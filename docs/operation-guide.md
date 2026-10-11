@@ -699,7 +699,7 @@ docker compose stop
 ```
 
 ```bash
-docker run --rm -v eapaka-node-provisioner_valkey-data:/data:ro -v "$PWD":/backup valkey/valkey:9 tar czf /backup/valkey-data.tgz -C /data .
+docker run --rm -v eapaka-node-provisioner_valkey-data:/data:ro -v "$PWD":/backup valkey/valkey:9.1.2 tar czf /backup/valkey-data.tgz -C /data .
 ```
 
 ```bash
@@ -717,7 +717,7 @@ docker compose down
 ```
 
 ```bash
-docker run --rm -v eapaka-node-provisioner_valkey-data:/data -v "$PWD":/backup valkey/valkey:9 sh -c 'rm -rf /data/* && tar xzf /backup/valkey-data.tgz -C /data'
+docker run --rm -v eapaka-node-provisioner_valkey-data:/data -v "$PWD":/backup valkey/valkey:9.1.2 sh -c 'rm -rf /data/* && tar xzf /backup/valkey-data.tgz -C /data'
 ```
 
 ```bash

@@ -39,7 +39,7 @@ EAP-AKA RADIUS PoC（以下「本PoC」）の Provisioning API と、aka-only-se
 
 他の Go のリポジトリ（aka-only-server、BFF 2 つ）と同じ。
 
-- 言語: Go 1.27.1。標準ライブラリを優先する（`net/http` のメソッドつき ServeMux と `r.PathValue`、`crypto/tls`、`encoding/json/v2`、`log/slog`）。
+- 言語: Go 1.27.2。標準ライブラリを優先する（`net/http` のメソッドつき ServeMux と `r.PathValue`、`crypto/tls`、`encoding/json/v2`、`log/slog`）。
 - 外部依存は `github.com/valkey-io/valkey-go` だけとする（プロジェクト全体で認めてきたもの）。
 - module パス: `github.com/oyaguma3/eapaka-node-provisioner`。コマンド名は `eapaka-provisioner`。
 - 設定は環境変数だけで受け取り、名前の接頭辞は `PROVISIONER_` とする（§11）。
@@ -277,7 +277,7 @@ prov の加入者、aka の加入者、ポリシーの 3 つの一覧を、同�
 
 - **単体テスト:** 下流を `httptest` の偽物にして、各手順での失敗（接続できない、409、400、5xx）を注入し、補償・やり直し・応答を確かめる。Valkey を使う部分は、接続先を環境変数で指定したときだけ実際の Valkey で試す。
 - **契約テスト:** 下流の接続先を環境変数（`PROVISIONER_TEST_CLIENT_CERT`、`PROVISIONER_TEST_PROV_URL` / `_PROV_SERVER_CERT`、`PROVISIONER_TEST_AKA_URL` / `_AKA_SERVER_CERT`）で指定したときだけ実行する（`internal/provapi`・`internal/akaapi` の `TestIntegration*`）。テスト用の IMSI（`00101...`）・IP（`198.51.100.0/24`）・AVクライアントを作り、最後に消す。下流の監査ログ（`/audit-logs`）に、操作者・管理クライアント・トレースID が残ることも確かめる。
-- **CI（GitHub Actions）:** 本PoC と aka-only-server を固定のコミット（`POC_REF` / `AKA_REF`）で checkout してバイナリでビルド・起動し、契約テストの相手にする。下流の API を変えたら、その main に入った後のコミットに更新する。
+- **CI（GitHub Actions）:** 本PoC と aka-only-server を固定のコミット（`POC_REF` / `AKA_REF`）で checkout してバイナリでビルド・起動し、契約テストの相手にする。下流の API を変えたら、その main に入った後のコミットに更新する。依存と標準ライブラリの既知の脆弱性は、別のワークフローが push と pull request のたびと毎週 govulncheck で調べる。
 - **起動しての確認:** 手元（WSL）では下流をバイナリと専用の Valkey コンテナで起動して通しで確かめる。simwifi では、同一ホスト（共有ネットワーク）と別ホスト（Tailscale のアドレス）で、BFF なしで curl から操作し、`aka` の加入者は eapaka_test で認証まで確かめる。
 
 ## 14. 将来拡張

@@ -1,6 +1,7 @@
 # eapaka-node-provisioner
 
 [![CI](https://github.com/oyaguma3/eapaka-node-provisioner/actions/workflows/ci.yml/badge.svg)](https://github.com/oyaguma3/eapaka-node-provisioner/actions/workflows/ci.yml)
+[![govulncheck](https://github.com/oyaguma3/eapaka-node-provisioner/actions/workflows/govulncheck.yml/badge.svg)](https://github.com/oyaguma3/eapaka-node-provisioner/actions/workflows/govulncheck.yml)
 
 [EAP-AKA RADIUS PoC](https://github.com/oyaguma3/eapaka-radius-server-poc)（以下「本PoC」）の Provisioning API と、[aka-only-server](https://github.com/oyaguma3/aka-only-server) の管理API を組み合わせて操作する統合API（コマンド名 `eapaka-provisioner`。以下「provisioner」）です。加入者を「IMSI＋鍵の置き場所＋認可ポリシー」として扱い、2 つのノードにまたがる操作の順序・排他・失敗時の補償を受け持ちます。
 
@@ -66,7 +67,7 @@ docker compose exec -T eapaka-provisioner /eapaka-provisioner check-downstream
 
 ## 開発
 
-Go 1.27 以上が必要です。外部依存は `github.com/valkey-io/valkey-go` だけです。
+Go 1.27.2 を使います。外部依存は `github.com/valkey-io/valkey-go` だけです。
 
 ```bash
 go test ./...
@@ -91,6 +92,8 @@ GitHub Actions（`.github/workflows/ci.yml`）で、push と pull request のた
 | テスト | gofmt の確認、`go vet`、race 検出つきのテスト（Valkey の結合テストを含む） |
 | イメージと compose の設定 | Docker イメージのビルド、compose の設定の検査（下流が同一ホスト・別ホスト） |
 | 下流との契約テスト | 本PoCと aka-only-server を固定のコミット（ci.yml の `POC_REF` / `AKA_REF`）で取得してビルド・起動し、`gen-client-cert` で作った証明書を登録して契約テストを実行する |
+
+依存と標準ライブラリの既知の脆弱性は、`.github/workflows/govulncheck.yml` が push と pull request のたびと、毎週月曜に govulncheck で調べます。
 
 ## ライセンス
 

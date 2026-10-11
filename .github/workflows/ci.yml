@@ -21,7 +21,7 @@ jobs:
     services:
       # internal/store の結合テストに使う。論理データベース 1 番を空にして使う。
       valkey:
-        image: valkey/valkey:9
+        image: valkey/valkey:9.1.2
         ports:
           - 6379:6379
         options: >-
@@ -84,12 +84,13 @@ jobs:
     timeout-minutes: 20
     env:
       # 契約テストの相手にする下流のコミット。下流の API を変えたら、その main に入った後のコミットに更新する。
+      # PoC セット（eapaka-pocset）のタグを付けるときは、その組み合わせの表のコミットと一致させる。
       POC_REF: dbd97f54df2200d18bc0ec977e73d6c86289baf4
-      AKA_REF: 2a6dcf84c82313e5e1b67035ad17083c2ec868c2
+      AKA_REF: b003b11d5f0c2227fa78613b0620f6836419d3f8
     services:
       # 下流がそれぞれ使う Valkey（このジョブ専用で、テストデータは最後に消える）。
       prov-valkey:
-        image: valkey/valkey:9
+        image: valkey/valkey:9.1.2
         ports:
           - 16379:6379
         options: >-
@@ -98,7 +99,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
       aka-valkey:
-        image: valkey/valkey:9
+        image: valkey/valkey:9.1.2
         ports:
           - 16380:6379
         options: >-

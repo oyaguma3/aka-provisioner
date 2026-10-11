@@ -43,7 +43,7 @@ services:
       - shared
 
   valkey:
-    image: valkey/valkey:9
+    image: valkey/valkey:9.1.2
     restart: unless-stopped
     # 操作の記録・ロック・Idempotency-Key・監査ログを保存する（provisioner 専用。下流の Valkey とは別）。
     # 操作の記録は補償・やり直しに使うので、AOF は書き込みごとに同期する。
