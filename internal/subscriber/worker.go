@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
+	"runtime/debug"
 	"slices"
 	"time"
 
@@ -28,11 +30,13 @@ const dueBatch = 100
 var errSkipped = errors.New("skipped")
 
 // RunWorker は、interval ごとに処理してよい時刻を過ぎた未完了の操作を処理する。ctx が終わるまで戻らない。
+// ctx が終わっても、処理中の操作は最後まで行ってから戻る（resume は下流の呼び出しを ctx の終わりから切り離している）。
+// 呼び出し側は、停止のときにこの戻りを待つ。
 func (s *Service) RunWorker(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
-		s.ProcessDue(ctx)
+		s.processDueSafely(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -54,7 +58,7 @@ func (s *Service) ProcessDue(ctx context.Context) int {
 		if ctx.Err() != nil {
 			break
 		}
-		op, err := s.resume(ctx, id, false)
+		op, err := s.resumeSafely(ctx, id)
 		switch {
 		case errors.Is(err, store.ErrLocked), errors.Is(err, errSkipped):
 			// 要求か別の処理がまだロックを持っている、または処理しなくてよい。次の回に回す。
@@ -67,6 +71,31 @@ func (s *Service) ProcessDue(ctx context.Context) int {
 		}
 	}
 	return n
+}
+
+// errPanicked は、操作の処理中にパニックが起き、回復したことを表す。
+var errPanicked = errors.New("panic while resuming operation")
+
+// resumeSafely は、ワーカーから操作の続きを行う。処理中のパニックは回復してエラーにする（1 件の不具合でワーカーを
+// 止めず、ほかの操作を続ける。パニックした操作は記録が残るので、次の回か手で対応する）。
+func (s *Service) resumeSafely(ctx context.Context, id string) (op store.Operation, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			s.Log.ErrorContext(ctx, "worker panic", "operation_id", id, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+			err = errPanicked
+		}
+	}()
+	return s.resume(ctx, id, false)
+}
+
+// processDueSafely は ProcessDue を呼び、操作の一覧の取得などで起きたパニックを回復する（ワーカーを止めない）。
+func (s *Service) processDueSafely(ctx context.Context) {
+	defer func() {
+		if p := recover(); p != nil {
+			s.Log.ErrorContext(ctx, "worker panic", "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+		}
+	}()
+	s.ProcessDue(ctx)
 }
 
 // resume は操作の続きを行う（作成・変更は補償、削除は残りの削除）。manual は、手でのやり直し（failed から）。

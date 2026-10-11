@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -42,6 +43,10 @@ const (
 	giveUpAfter = 24 * time.Hour
 	// workerInterval は、ワーカーが未完了の操作を見る間隔。
 	workerInterval = 30 * time.Second
+	// workerStopTimeout は、停止のときにワーカーが処理中の操作を終えるのを待つ上限。超えたら待たずに終了する
+	// （操作の記録が残るので、次の起動でワーカーが続きを行う）。サーバーの停止の上限（10 秒）と合わせて、
+	// compose の stop_grace_period（30 秒）に収める。
+	workerStopTimeout = 15 * time.Second
 )
 
 const usage = `usage: eapaka-provisioner <command>
@@ -53,6 +58,7 @@ commands:
                      （eapaka-provisioner gen-client-cert -h で使い方を表示）
   server-cert        provisioner の API のサーバー証明書（PEM）を標準出力に出す（なければ自己署名を作る）。
                      管理クライアント（BFF など）に検証用として渡す
+  healthcheck        動いている provisioner の API に接続できるかを確かめる（compose の healthcheck 用）
 
 設定は環境変数で与える。
 `
@@ -76,6 +82,8 @@ func main() {
 		err = genClientCert(args[1:], os.Stdout, os.Stderr)
 	case "server-cert":
 		err = serverCert(os.Stdout, os.Stderr)
+	case "healthcheck":
+		err = healthcheck(ctx)
 	case "-h", "-help", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -168,14 +176,37 @@ func serve(ctx context.Context) error {
 	}
 	h.Subscribers = subs
 	// やり直しのワーカー。要求が落ちた操作と、補償・やり直しが失敗した操作を続ける（設計概要 §9.3）。
-	go subs.RunWorker(ctx, workerInterval)
-	return server.Run(ctx, server.Options{
+	// サーバーが停止の合図以外で終わった（待ち受けの失敗など）ときもワーカーを止めるよう、別の ctx で動かす。
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	defer stopWorker()
+	var wg sync.WaitGroup
+	wg.Go(func() { subs.RunWorker(workerCtx, workerInterval) })
+	err = server.Run(ctx, server.Options{
 		Addr:           cfg.Addr,
 		GetCertificate: cert.GetCertificate,
 		AdminClients:   cfg.AdminClients,
 		Handler:        h.Routes(),
 		Log:            log,
 	})
+	// 停止のときは、ワーカーが処理中の操作を終えるのを待つ（途中で終わると補償が中断する）。
+	stopWorker()
+	waitWorker(&wg, workerStopTimeout, log)
+	return err
+}
+
+// waitWorker は、ワーカーが戻るのを timeout まで待つ。
+func waitWorker(wg *sync.WaitGroup, timeout time.Duration, log *slog.Logger) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Info("worker stopped")
+	case <-time.After(timeout):
+		log.Warn("worker did not stop in time; the operation in progress will be resumed after restart", "timeout", timeout)
+	}
 }
 
 // newClients は下流のクライアントを作る。aka-only-server を扱わない設定なら aka は nil。

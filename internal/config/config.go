@@ -104,6 +104,8 @@ func Load() (Config, error) {
 	}
 	if c.DownstreamTimeout, err = positiveDuration("PROVISIONER_DOWNSTREAM_TIMEOUT", 5*time.Second); err != nil {
 		errs = append(errs, err)
+	} else if c.DownstreamTimeout > MaxDownstreamTimeout {
+		errs = append(errs, fmt.Errorf("PROVISIONER_DOWNSTREAM_TIMEOUT: must be %s or less (an operation calls the downstreams up to 5 times in sequence within the 60s IMSI lock)", MaxDownstreamTimeout))
 	}
 	if c.AuditMaxLen, err = positiveInt("PROVISIONER_AUDIT_MAX", 10000); err != nil {
 		errs = append(errs, err)
@@ -128,6 +130,11 @@ func Load() (Config, error) {
 	}
 	return c, nil
 }
+
+// MaxDownstreamTimeout は PROVISIONER_DOWNSTREAM_TIMEOUT の上限。1 つの操作（加入者の作成など）は下流を順に最大 5 回
+// 呼ぶ（存在確認、作成、認可ポリシー、補償 2 回）ので、その合計を IMSI のロックの有効期限（60 秒。api.LockTTL）に収める
+// （設計概要 §9.1）。
+const MaxDownstreamTimeout = 10 * time.Second
 
 // CheckServe は、サーバーの起動に必須の設定がそろっているかを確かめる。
 func (c Config) CheckServe() error {

@@ -5,9 +5,19 @@ services:
       args:
         VERSION: ${PROVISIONER_VERSION:-dev}
     restart: unless-stopped
+    # 停止の合図から、API のサーバーを閉じ終えるまで最大 10 秒、ワーカーが処理中の操作を終えるまで最大 15 秒かかる。
+    # Docker の既定の猶予（10 秒）では途中で強制終了されるので、長くする。
+    stop_grace_period: 30s
     depends_on:
       valkey:
         condition: service_healthy
+    # API の待ち受けに接続できるかを確かめる（distroless のため curl はない。mTLS なので TCP の接続まで）。
+    healthcheck:
+      test: ["CMD", "/eapaka-provisioner", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     environment:
       PROVISIONER_ADDR: ":9446"
       PROVISIONER_TLS_CERT: ${PROVISIONER_TLS_CERT:-/data/tls/cert.pem}

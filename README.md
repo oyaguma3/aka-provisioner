@@ -45,7 +45,7 @@ Docker Engine と compose プラグインが必要です。本PoC（provisioning
 2. `eapaka-provisioner gen-client-cert` で下流に提示するクライアント証明書を作り、表示された値を本PoCの `PROVISIONING_API_ADMIN_CLIENTS` と aka-only-server の `AKA_ADMIN_CLIENTS` に登録する。
 3. 下流 2 つのサーバー証明書を `certs/` に置く（所有者は UID 65532）。
 4. `.env` に、管理クライアント（BFF など）、aka-only-server の URL、vector-gateway の AVクライアントID、本PoCと同じ PLMN マップを書く。
-5. 起動して、下流に接続できることを確かめる。
+5. 起動して、下流に接続できることを確かめる（`docker compose ps` で healthy になるのは API が待ち受けていること。下流は `check-downstream` で見る）。
 
 ```bash
 docker compose up -d

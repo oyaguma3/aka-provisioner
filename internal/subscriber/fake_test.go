@@ -23,9 +23,12 @@ import (
 // 偽物の下流と Valkey。fault で、呼び出しごとに失敗を起こせる。
 
 // fault は 1 回の呼び出しの失敗。applied が true なら、下流には反映したうえで失敗を返す（タイムアウトの再現）。
+// before は呼び出しの最初に行う処理（停止の合図の再現など）、panics は呼び出しでパニックを起こす（ワーカーの回復の確認）。
 type fault struct {
 	err     error
 	applied bool
+	before  func()
+	panics  bool
 }
 
 // faults は「操作名」ごとの失敗の予定（先頭から 1 回ずつ使う）。
@@ -37,13 +40,20 @@ type faults struct {
 
 func (f *faults) next(op string) (fault, bool) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls = append(f.calls, op)
 	if len(f.plans[op]) == 0 {
+		f.mu.Unlock()
 		return fault{}, false
 	}
 	ft := f.plans[op][0]
 	f.plans[op] = f.plans[op][1:]
+	f.mu.Unlock()
+	if ft.before != nil {
+		ft.before()
+	}
+	if ft.panics {
+		panic("injected panic: " + op)
+	}
 	return ft, true
 }
 

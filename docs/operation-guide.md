@@ -287,6 +287,8 @@ ls -l certs
 docker compose up -d
 ```
 
+`docker compose ps` で `eapaka-provisioner` が healthy になる（compose の healthcheck は `eapaka-provisioner healthcheck` で、API の待ち受けに TCP で接続できるかを見る。下流の状態は次の起動ログと `check-downstream` で見る）。
+
 起動ログに、下流 2 つと vector-gateway の AVクライアントの確認の結果が出る。
 
 ```bash
@@ -757,6 +759,10 @@ docker compose exec -T eapaka-provisioner /eapaka-provisioner check-downstream
 
 ## 10. 障害時の確認
 
+`docker compose ps` で `eapaka-provisioner` が unhealthy なら、API が待ち受けていない。`docker compose logs eapaka-provisioner` で起動のエラー（設定の誤り、Valkey に接続できない、証明書の読み込みの失敗など）を確かめる。
+
+停止（`docker compose stop` / `down`、更新）には最大 30 秒かかる。ワーカーが処理中の操作を最後まで行ってから終わるため（`stop_grace_period`）。
+
 まず `check-downstream` で下流への接続を確かめる。接続できない場合は、原因の見当が表示される。同じ内容は `/status` の `downstreams.*.hint` と、起動ログの `hint` にも出る。
 
 ```bash
@@ -807,7 +813,7 @@ aka-only-server の管理API: https://aka-only-server:9443/admin/v1
 | `PROVISIONER_AKA_AV_CLIENT_ID` | （`PROVISIONER_AKA_URL` を設定したら必須） | vector-gateway の AVクライアントID |
 | `PROVISIONER_PLMN_MAP` | （空: すべて `poc`） | PLMN マップ（本PoCの `VECTOR_GATEWAY_PLMN_MAP` と同じ値） |
 | `PROVISIONER_CLIENT_KEY` | （空: クライアント証明書のファイルから読む） | 下流用のクライアント証明書の秘密鍵を別のファイルにした場合の、コンテナ内のパス（`/certs/...`） |
-| `PROVISIONER_DOWNSTREAM_TIMEOUT` | `5s` | 下流の 1 回の呼び出しの上限時間 |
+| `PROVISIONER_DOWNSTREAM_TIMEOUT` | `5s` | 下流の 1 回の呼び出しの上限時間。10 秒まで（超えると起動しない） |
 | `PROVISIONER_PUBLISH` | `127.0.0.1:9446` | provisioner の API を公開するホスト側のアドレスとポート |
 | `PROVISIONER_TLS_HOSTS` | `localhost,127.0.0.1,eapaka-provisioner` | 自己署名のサーバー証明書の SAN（生成済みの証明書には反映されない。3.4） |
 | `PROVISIONER_TLS_CERT` / `PROVISIONER_TLS_KEY` | （空: 自己署名） | 持ち込みのサーバー証明書と秘密鍵のコンテナ内のパス（`/certs/...`）。ファイルを置き換えると、次の接続から読み直す |

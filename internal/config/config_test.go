@@ -59,6 +59,7 @@ func TestLoadErrors(t *testing.T) {
 			"PROVISIONER_AKA_URL": "https://aka-only-server:9443/admin/v1", "PROVISIONER_AKA_AV_CLIENT_ID": "0",
 		},
 		"bad timeout":   {"PROVISIONER_DOWNSTREAM_TIMEOUT": "5"},
+		"long timeout":  {"PROVISIONER_DOWNSTREAM_TIMEOUT": "11s"},
 		"bad audit max": {"PROVISIONER_AUDIT_MAX": "-1"},
 		"bad log level": {"PROVISIONER_LOG_LEVEL": "verbose"},
 	} {
@@ -70,5 +71,13 @@ func TestLoadErrors(t *testing.T) {
 				t.Error("want error")
 			}
 		})
+	}
+}
+
+func TestDownstreamTimeoutLimit(t *testing.T) {
+	t.Setenv("PROVISIONER_DOWNSTREAM_TIMEOUT", "10s")
+	c, err := Load()
+	if err != nil || c.DownstreamTimeout != MaxDownstreamTimeout {
+		t.Errorf("10s: %v %v", c.DownstreamTimeout, err)
 	}
 }

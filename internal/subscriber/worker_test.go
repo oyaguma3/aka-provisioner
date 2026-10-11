@@ -1,8 +1,12 @@
 package subscriber
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -346,5 +350,68 @@ func TestUnresolvedOperationBlocksNewOperations(t *testing.T) {
 	}
 	if _, ok := e.aka.subs[akaIMSI]; ok {
 		t.Error("aka subscriber remains")
+	}
+}
+
+func TestWorkerRecoversFromPanic(t *testing.T) {
+	// 2 つの操作のうち、先に処理した方の補償でパニックが起きても、ワーカーは止まらず、もう 1 つを処理する。
+	e := newEnv(t)
+	var logs bytes.Buffer
+	e.s.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	for _, imsi := range []string{pocIMSI, akaIMSI} {
+		e.prov.policies[imsi] = provapi.Policy{IMSI: imsi}
+	}
+	e.prov.subs[pocIMSI] = provapi.Subscriber{IMSI: pocIMSI}
+	e.aka.subs[akaIMSI] = akaapi.Subscriber{IMSI: akaIMSI, AllowedClientIDs: []int64{1}}
+	e.staleOp("op-p1", KindCreate, pocIMSI, "poc", step("subscriber.create", "prov", "done"), step("policy.put", "prov", "pending"))
+	e.staleOp("op-p2", KindCreate, akaIMSI, "aka", step("subscriber.create", "aka", "done"), step("policy.put", "prov", "pending"))
+	e.prov.plan("prov.DeletePolicy", fault{panics: true})
+
+	if n := e.s.ProcessDue(t.Context()); n != 1 {
+		t.Fatalf("processed = %d, want 1", n)
+	}
+	if !strings.Contains(logs.String(), `"msg":"worker panic"`) || !strings.Contains(logs.String(), "injected panic") {
+		t.Errorf("panic was not logged: %s", logs.String())
+	}
+	statuses := []string{e.st.op("op-p1").Status, e.st.op("op-p2").Status}
+	slices.Sort(statuses)
+	if !slices.Equal(statuses, []string{store.OpRolledBack, store.OpRunning}) {
+		t.Fatalf("statuses = %v", statuses)
+	}
+	// パニックした操作の IMSI のロックは解放されていて、次の回に処理できる。
+	if n := e.s.ProcessDue(t.Context()); n != 1 {
+		t.Fatalf("processed on the next round = %d, want 1", n)
+	}
+	for _, id := range []string{"op-p1", "op-p2"} {
+		if st := e.st.op(id).Status; st != store.OpRolledBack {
+			t.Errorf("%s = %s", id, st)
+		}
+	}
+}
+
+func TestRunWorkerFinishesCurrentOperationOnStop(t *testing.T) {
+	// 停止の合図（ctx の終わり）が処理の途中で来ても、その操作は最後まで行ってから RunWorker が戻る。
+	e := newEnv(t)
+	e.prov.policies[pocIMSI] = provapi.Policy{IMSI: pocIMSI}
+	e.prov.subs[pocIMSI] = provapi.Subscriber{IMSI: pocIMSI}
+	e.staleOp("op-s1", KindCreate, pocIMSI, "poc", step("subscriber.create", "prov", "done"), step("policy.put", "prov", "pending"))
+	ctx, cancel := context.WithCancel(t.Context())
+	e.prov.plan("prov.DeletePolicy", fault{before: cancel, applied: true})
+
+	done := make(chan struct{})
+	go func() {
+		e.s.RunWorker(ctx, time.Hour)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunWorker did not return after ctx was canceled")
+	}
+	if op := e.st.op("op-s1"); op.Status != store.OpRolledBack {
+		t.Errorf("op = %s %s, want rolled_back (finished despite the stop)", op.Status, stepStates(op.Steps))
+	}
+	if leftovers(e, pocIMSI) != "" {
+		t.Errorf("left = %q", leftovers(e, pocIMSI))
 	}
 }
