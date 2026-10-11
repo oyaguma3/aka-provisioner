@@ -85,8 +85,8 @@ jobs:
     env:
       # 契約テストの相手にする下流のコミット。下流の API を変えたら、その main に入った後のコミットに更新する。
       # PoC セット（eapaka-pocset）のタグを付けるときは、その組み合わせの表のコミットと一致させる。
-      POC_REF: 061d7d0b3c969292b45acec8ea2440bd78332072
-      AKA_REF: b003b11d5f0c2227fa78613b0620f6836419d3f8
+      POC_REF: 0d5f53e0087ec9b93c0a379e709ba083133b1dc9
+      AKA_REF: 157ff8a45ee0c2667ee514e447263880d35bdd9e
     services:
       # 下流がそれぞれ使う Valkey（このジョブ専用で、テストデータは最後に消える）。
       prov-valkey:
