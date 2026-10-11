@@ -49,7 +49,7 @@ func serve(ctx context.Context, ln net.Listener, opts Options) error {
 		// 加入者の作成などは下流を何度か呼ぶので、書き込みの時間は長めにとる。
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
-		ErrorLog:     slog.NewLogLogger(opts.Log.Handler(), slog.LevelWarn),
+		ErrorLog:     newHTTPErrorLog(opts.Log.Handler()),
 	}
 
 	errc := make(chan error, 1)
