@@ -3,6 +3,8 @@
 [![CI](https://github.com/oyaguma3/eapaka-node-provisioner/actions/workflows/ci.yml/badge.svg)](https://github.com/oyaguma3/eapaka-node-provisioner/actions/workflows/ci.yml)
 [![govulncheck](https://github.com/oyaguma3/eapaka-node-provisioner/actions/workflows/govulncheck.yml/badge.svg)](https://github.com/oyaguma3/eapaka-node-provisioner/actions/workflows/govulncheck.yml)
 
+> このリポジトリは、4 つのソフトウェア（[本PoC](https://github.com/oyaguma3/eapaka-radius-server-poc)、[aka-only-server](https://github.com/oyaguma3/aka-only-server)、[eapaka-node-provisioner](https://github.com/oyaguma3/eapaka-node-provisioner)、[eapaka-ossbss-sample](https://github.com/oyaguma3/eapaka-ossbss-sample)）を組み合わせを確かめて提供する **PoC セット**（[eapaka-pocset](https://github.com/oyaguma3/eapaka-pocset)）の一部です。組み合わせ（各リポジトリのコミット）、変更の記録（CHANGELOG）、1 台への導入の案内、4 つを通した試験は eapaka-pocset にあります。
+
 [EAP-AKA RADIUS PoC](https://github.com/oyaguma3/eapaka-radius-server-poc)（以下「本PoC」）の Provisioning API と、[aka-only-server](https://github.com/oyaguma3/aka-only-server) の管理API を組み合わせて操作する統合API（コマンド名 `eapaka-provisioner`。以下「provisioner」）です。加入者を「IMSI＋鍵の置き場所＋認可ポリシー」として扱い、2 つのノードにまたがる操作の順序・排他・失敗時の補償を受け持ちます。
 
 ```
