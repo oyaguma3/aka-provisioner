@@ -69,7 +69,7 @@ docker compose exec -T eapaka-provisioner /eapaka-provisioner check-downstream
 
 ## 開発
 
-Go 1.27.2 を使います。外部依存は `github.com/valkey-io/valkey-go` だけです。
+Go 1.27.3 を使います。外部依存は `github.com/valkey-io/valkey-go` だけです。
 
 ```bash
 go test ./...

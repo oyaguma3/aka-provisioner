@@ -39,7 +39,7 @@ EAP-AKA RADIUS PoC（以下「本PoC」）の Provisioning API と、aka-only-se
 
 他の Go のリポジトリ（aka-only-server、BFF 2 つ）と同じ。
 
-- 言語: Go 1.27.2。標準ライブラリを優先する（`net/http` のメソッドつき ServeMux と `r.PathValue`、`crypto/tls`、`encoding/json/v2`、`log/slog`）。
+- 言語: Go 1.27.3。標準ライブラリを優先する（`net/http` のメソッドつき ServeMux と `r.PathValue`、`crypto/tls`、`encoding/json/v2`、`log/slog`）。
 - 外部依存は `github.com/valkey-io/valkey-go` だけとする（プロジェクト全体で認めてきたもの）。
 - module パス: `github.com/oyaguma3/eapaka-node-provisioner`。コマンド名は `eapaka-provisioner`。
 - 設定は環境変数だけで受け取り、名前の接頭辞は `PROVISIONER_` とする（§11）。
