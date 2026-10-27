@@ -1,7 +1,7 @@
 // Package trace はトレースID を扱う。
 //
 // provisioner は、管理クライアント（BFF など）が X-Trace-ID ヘッダーで渡したトレースID を使い、なければ採番する。
-// 同じ値を下流（provisioning-api と aka-only-server の管理API）にも X-Trace-ID で渡すので、
+// 同じ値を下流（provisioning-api と aka-vecgen の管理API）にも X-Trace-ID で渡すので、
 // 管理クライアント・provisioner・下流のログと監査ログをトレースID で突き合わせられる。
 package trace
 

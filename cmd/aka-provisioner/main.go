@@ -1,5 +1,5 @@
-// eapaka-provisioner は、EAP-AKA RADIUS PoC（eapaka-radius-server-poc）の Provisioning API と
-// aka-only-server の管理API を組み合わせて操作する統合API。設計は docs/design-overview.md を参照。
+// aka-provisioner は、EAP-AKA RADIUS PoC（aka-radius）の Provisioning API と
+// aka-vecgen の管理API を組み合わせて操作する統合API。設計は docs/design-overview.md を参照。
 package main
 
 import (
@@ -16,16 +16,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/akaapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/api"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/audit"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/certs"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/config"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/server"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/subscriber"
+	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
+	"github.com/oyaguma3/aka-provisioner/internal/api"
+	"github.com/oyaguma3/aka-provisioner/internal/audit"
+	"github.com/oyaguma3/aka-provisioner/internal/certs"
+	"github.com/oyaguma3/aka-provisioner/internal/config"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/server"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/subscriber"
 )
 
 // version はビルド時に -ldflags "-X main.version=..." で埋め込む。
@@ -49,13 +49,13 @@ const (
 	workerStopTimeout = 15 * time.Second
 )
 
-const usage = `usage: eapaka-provisioner <command>
+const usage = `usage: aka-provisioner <command>
 
 commands:
   serve              サーバーを起動する（コマンド省略時の既定）
-  check-downstream   下流（本PoCの Provisioning API、aka-only-server の管理API）に接続できるか確かめる
+  check-downstream   下流（本PoCの Provisioning API、aka-vecgen の管理API）に接続できるか確かめる
   gen-client-cert    下流に提示するクライアント証明書と秘密鍵を作る
-                     （eapaka-provisioner gen-client-cert -h で使い方を表示）
+                     （aka-provisioner gen-client-cert -h で使い方を表示）
   server-cert        provisioner の API のサーバー証明書（PEM）を標準出力に出す（なければ自己署名を作る）。
                      管理クライアント（BFF など）に検証用として渡す
   healthcheck        動いている provisioner の API に接続できるかを確かめる（compose の healthcheck 用）
@@ -142,7 +142,7 @@ func serve(ctx context.Context) error {
 	if aka != nil {
 		logClient(log, aka.Client)
 	} else {
-		log.Info("aka-only-server is not configured (PROVISIONER_AKA_URL is empty)")
+		log.Info("aka-vecgen is not configured (PROVISIONER_AKA_URL is empty)")
 	}
 	// 起動時点で下流が動いていなくても起動は続ける。/status と各操作のエラーで示す。
 	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -209,7 +209,7 @@ func waitWorker(wg *sync.WaitGroup, timeout time.Duration, log *slog.Logger) {
 	}
 }
 
-// newClients は下流のクライアントを作る。aka-only-server を扱わない設定なら aka は nil。
+// newClients は下流のクライアントを作る。aka-vecgen を扱わない設定なら aka は nil。
 func newClients(cfg config.Config, log *slog.Logger) (*provapi.Client, *akaapi.Client, error) {
 	prov, err := provapi.New(downstream.Options{
 		BaseURL:        cfg.ProvURL,
@@ -234,7 +234,7 @@ func newClients(cfg config.Config, log *slog.Logger) (*provapi.Client, *akaapi.C
 		Log:            log,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("aka-only-server client: %w", err)
+		return nil, nil, fmt.Errorf("aka-vecgen client: %w", err)
 	}
 	return prov, aka, nil
 }
@@ -256,10 +256,10 @@ func checkProv(ctx context.Context, log *slog.Logger, prov *provapi.Client) {
 func checkAka(ctx context.Context, log *slog.Logger, aka *akaapi.Client, avClientID int64) {
 	st, err := aka.Status(ctx)
 	if err != nil {
-		log.Warn("aka-only-server is not available", "error", err, "hint", akaapi.Diagnose(err))
+		log.Warn("aka-vecgen is not available", "error", err, "hint", akaapi.Diagnose(err))
 		return
 	}
-	log.Info("aka-only-server is available", "server_version", st.Version)
+	log.Info("aka-vecgen is available", "server_version", st.Version)
 	switch c, err := aka.GetAVClient(ctx, avClientID); {
 	case err != nil:
 		log.Warn("av client of vector-gateway is not available", "av_client_id", avClientID, "error", err)
@@ -305,19 +305,19 @@ func checkDownstream(ctx context.Context) error {
 
 	fmt.Println()
 	if aka == nil {
-		fmt.Println("aka-only-server の管理API: 設定なし（PROVISIONER_AKA_URL が空）")
+		fmt.Println("aka-vecgen の管理API: 設定なし（PROVISIONER_AKA_URL が空）")
 		return errors.Join(errs...)
 	}
-	fmt.Println("aka-only-server の管理API:", aka.BaseURL())
+	fmt.Println("aka-vecgen の管理API:", aka.BaseURL())
 	st, err := aka.Status(ctx)
 	if err != nil {
 		printFailure(akaapi.Diagnose(err), err)
 		return errors.Join(append(errs, err)...)
 	}
-	fmt.Printf("  接続できました。aka-only-server %s（加入者 %d、AVクライアント %d）\n", st.Version, st.SubscriberCount, st.ClientCount)
+	fmt.Printf("  接続できました。aka-vecgen %s（加入者 %d、AVクライアント %d）\n", st.Version, st.SubscriberCount, st.ClientCount)
 	switch c, err := aka.GetAVClient(ctx, cfg.AkaAVClientID); {
 	case downstream.CauseOf(err) == akaapi.CauseClientNotFound:
-		fmt.Printf("  vector-gateway の AVクライアント（ID %d）が aka-only-server にありません。PROVISIONER_AKA_AV_CLIENT_ID を確認してください。\n",
+		fmt.Printf("  vector-gateway の AVクライアント（ID %d）が aka-vecgen にありません。PROVISIONER_AKA_AV_CLIENT_ID を確認してください。\n",
 			cfg.AkaAVClientID)
 		errs = append(errs, err)
 	case err != nil:

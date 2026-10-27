@@ -45,7 +45,7 @@ func SelfSigned(commonName string, hosts []string, validFor time.Duration) (cert
 }
 
 // SelfSignedClient はクライアント認証用の ECDSA P-256 の鍵と自己署名証明書を生成し、PEM で返す。
-// 下流（provisioning-api と aka-only-server の管理API）に提示するクライアント証明書に使う（下流はフィンガープリントで照合する）。
+// 下流（provisioning-api と aka-vecgen の管理API）に提示するクライアント証明書に使う（下流はフィンガープリントで照合する）。
 func SelfSignedClient(commonName string, validFor time.Duration) (certPEM, keyPEM []byte, err error) {
 	return selfSigned(commonName, nil, validFor, x509.ExtKeyUsageClientAuth)
 }
@@ -111,7 +111,7 @@ func EnsureFiles(certPath, keyPath string, hosts []string) (bool, error) {
 		return false, fmt.Errorf("%s exists but %s does not", keyPath, certPath)
 	}
 
-	certPEM, keyPEM, err := SelfSigned("eapaka-provisioner", hosts, selfSignedValidFor)
+	certPEM, keyPEM, err := SelfSigned("aka-provisioner", hosts, selfSignedValidFor)
 	if err != nil {
 		return false, fmt.Errorf("generate self-signed server certificate: %w", err)
 	}

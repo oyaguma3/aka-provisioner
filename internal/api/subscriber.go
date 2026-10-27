@@ -11,12 +11,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/plmn"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/subscriber"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/trace"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/plmn"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/subscriber"
+	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
 // SubscriberService は加入者の統合操作。*subscriber.Service が満たす。

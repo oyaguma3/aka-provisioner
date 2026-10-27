@@ -13,7 +13,7 @@ CLAUDE.md
 /certs/
 
 # リポジトリ直下で go build したときの成果物
-/eapaka-node-provisioner
+/aka-provisioner
 
 # テストとカバレッジ
 *.test

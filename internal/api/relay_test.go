@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
 )
 
 func problemResp(status int, cause string) downstream.RelayResponse {

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/akaapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
 )
 
 // staleOp は、要求が落ちて実行中のまま残った（ロックの有効期限を過ぎた）操作の記録を作る。
@@ -289,7 +289,7 @@ func TestOperationsAndDismiss(t *testing.T) {
 }
 
 func TestUnresolvedOperationBlocksNewOperations(t *testing.T) {
-	// 作成の補償が残った（aka-only-server に接続できず、作った加入者を消せていない）。
+	// 作成の補償が残った（aka-vecgen に接続できず、作った加入者を消せていない）。
 	e := newEnv(t)
 	e.aka.subs[akaIMSI] = akaapi.Subscriber{IMSI: akaIMSI, AllowedClientIDs: []int64{1}}
 	op := e.staleOp("0199c8a2-0000-7000-8000-000000000001", KindCreate, akaIMSI, "aka",

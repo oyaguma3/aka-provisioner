@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream/downstreamtest"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream/downstreamtest"
 )
 
 func TestStatus(t *testing.T) {

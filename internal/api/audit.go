@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/trace"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
 // record は操作を監査ログに残す（設計概要 §10.2）。details に秘密の値を入れてはならない。

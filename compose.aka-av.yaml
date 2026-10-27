@@ -1,13 +1,13 @@
-# aka-only-server と同じホストで動かすときに重ねる設定。
-# aka-only-server の compose が作る共有ネットワーク（既定の名前は aka-av）に provisioner だけを参加させ、
-# ホスト名 aka-only-server で管理API に接続する。provisioner 専用の Valkey は参加させない。
-# aka-only-server を先に起動する。.env の COMPOSE_FILE に加えると有効になる。
+# aka-vecgen と同じホストで動かすときに重ねる設定。
+# aka-vecgen の compose が作る共有ネットワーク（既定の名前は aka-av）に provisioner だけを参加させ、
+# ホスト名 aka-vecgen で管理API に接続する。provisioner 専用の Valkey は参加させない。
+# aka-vecgen を先に起動する。.env の COMPOSE_FILE に加えると有効になる。
 services:
-  eapaka-provisioner:
+  aka-provisioner:
     networks:
       - aka-av
 
 networks:
   aka-av:
     external: true
-    name: ${AKA_SHARED_NETWORK:-aka-av}
+    name: ${VECGEN_SHARED_NETWORK:-aka-av}

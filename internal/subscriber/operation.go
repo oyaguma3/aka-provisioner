@@ -8,11 +8,11 @@ import (
 	"time"
 	"uuid"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/akaapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/plmn"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/plmn"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
 )
 
 // 操作の種類。
@@ -43,7 +43,7 @@ type CreateInput struct {
 	// AMF と SQN は空なら下流の既定値。
 	AMF string
 	SQN string
-	// SQNType と AllowPlain は置き場所が aka のときだけ（空・nil なら aka-only-server の既定値）。
+	// SQNType と AllowPlain は置き場所が aka のときだけ（空・nil なら aka-vecgen の既定値）。
 	SQNType    string
 	AllowPlain *bool
 	Policy     provapi.PolicyPut

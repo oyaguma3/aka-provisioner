@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream/downstreamtest"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream/downstreamtest"
 )
 
 func TestStatusAndAVClient(t *testing.T) {
@@ -53,12 +53,12 @@ func TestStatusAndAVClient(t *testing.T) {
 }
 
 func TestDiagnose(t *testing.T) {
-	// 文面が aka-only-server の設定と手順を指していること（判定そのものは internal/downstream で確かめる）。
-	dnsErr := fmt.Errorf("wrap: %w", &net.DNSError{Name: "aka-only-server", IsNotFound: true})
-	if got := Diagnose(dnsErr); !strings.Contains(got, "（aka-only-server）") || !strings.Contains(got, "aka-av") {
+	// 文面が aka-vecgen の設定と手順を指していること（判定そのものは internal/downstream で確かめる）。
+	dnsErr := fmt.Errorf("wrap: %w", &net.DNSError{Name: "aka-vecgen", IsNotFound: true})
+	if got := Diagnose(dnsErr); !strings.Contains(got, "（aka-vecgen）") || !strings.Contains(got, "aka-av") {
 		t.Errorf("dns: %q", got)
 	}
-	if !strings.Contains(hints.UnknownServer, "PROVISIONER_AKA_SERVER_CERT") || !strings.Contains(hints.ClientRejected, "AKA_ADMIN_CLIENTS") {
+	if !strings.Contains(hints.UnknownServer, "PROVISIONER_AKA_SERVER_CERT") || !strings.Contains(hints.ClientRejected, "VECGEN_ADMIN_CLIENTS") {
 		t.Errorf("hints = %+v", hints)
 	}
 }

@@ -1,24 +1,24 @@
 # 運用ガイド
 
-- 対象: eapaka-node-provisioner（統合API。コマンド名 `eapaka-provisioner`。以下「provisioner」）を導入・運用する人。
-- 関連: [README](../README.md)、[設計概要](design-overview.md)、[API 仕様](openapi/provisioner-api.yaml)、本PoC（eapaka-radius-server-poc）の `docs/B-02_アプリケーションデプロイ手順書_r*.md` §14（aka-only-server への接続）・§15（Provisioning API の有効化）、aka-only-server の `docs/operation-guide.md`
+- 対象: aka-provisioner（統合API。コマンド名 `aka-provisioner`。以下「provisioner」）を導入・運用する人。
+- 関連: [README](../README.md)、[設計概要（PoC。今の作り）](poc/design-overview.md)、[API 仕様](openapi/provisioner-api.yaml)、本PoC（aka-radius）の `docs/B-02_アプリケーションデプロイ手順書_r*.md` §14（aka-vecgen への接続）・§15（Provisioning API の有効化）、aka-vecgen の `docs/operation-guide.md`
 - 本書の手順は、2026-10-10 に検証用の実機（Debian 13、Docker Engine と compose プラグイン、Tailscale）で実行して確かめた。別ホストの構成は、同じ tailnet の別のマシン（WSL）から確かめた。
 
 ## 1. 構成
 
-provisioner は、本PoCの Provisioning API（provisioning-api。以下「prov」）と aka-only-server の管理API（以下「aka」）を組み合わせて、加入者を「IMSI＋鍵の置き場所＋認可ポリシー」として操作する。加入者のデータは下流の 2 つが持ち、provisioner は保存しない。
+provisioner は、本PoCの Provisioning API（provisioning-api。以下「prov」）と aka-vecgen の管理API（以下「aka」）を組み合わせて、加入者を「IMSI＋鍵の置き場所＋認可ポリシー」として操作する。加入者のデータは下流の 2 つが持ち、provisioner は保存しない。
 
 ```
 [BFF など] ──mTLS──> [provisioner] ──> Valkey（provisioner 専用）
                        ├─mTLS─> provisioning-api（本PoC）   … 加入者（鍵を本PoCに置くもの）・RADIUSクライアント・認可ポリシー
-                       └─mTLS─> aka-only-server の管理API  … 加入者（鍵を aka-only-server に置くもの）
+                       └─mTLS─> aka-vecgen の管理API  … 加入者（鍵を aka-vecgen に置くもの）
 ```
 
 `docker compose` で 2 つのコンテナを動かす。
 
 | コンテナ | 内容 |
 |---|---|
-| `eapaka-provisioner` | provisioner の API（`/admin/v1`）と、補償・やり直しのワーカー |
+| `aka-provisioner` | provisioner の API（`/admin/v1`）と、補償・やり直しのワーカー |
 | `valkey` | provisioner 専用の Valkey。操作の記録、IMSI ごとのロック、`Idempotency-Key`、監査ログを保存する。ホストにもほかのプロジェクトにもポートを公開しない（下流の Valkey とは別） |
 
 | 待ち受け | コンテナ内のポート | ホスト側の公開先（既定） |
@@ -30,12 +30,12 @@ provisioner は、本PoCの Provisioning API（provisioning-api。以下「prov�
 | 操作の記録、ロック、`Idempotency-Key` の記録、provisioner の監査ログ | ボリューム `valkey-data` |
 | 自動生成した provisioner のサーバー証明書と秘密鍵 | ボリューム `provisioner-data` |
 | 下流用の証明書（下に一覧）、持ち込みのサーバー証明書 | ホストの `certs/`（読み取り専用でマウント） |
-| 加入者の鍵、認可ポリシー、RADIUSクライアント | 下流（本PoCと aka-only-server） |
+| 加入者の鍵、認可ポリシー、RADIUSクライアント | 下流（本PoCと aka-vecgen） |
 
-1 つの provisioner が扱うのは、本PoCの 1 ノードと aka-only-server の 1 台である。下流の版は次を使う。
+1 つの provisioner が扱うのは、本PoCの 1 ノードと aka-vecgen の 1 台である。下流の版は次を使う。
 
 - 本PoCの provisioning-api 0.4.0 以降（本PoCの main の dbd97f5 以降）。0.3.0（def95e5 以降）でも動くが、加入者の停止・再開（2.10）が使えず、加入者の `status` も出ない。
-- aka-only-server の管理API 0.2.0 以降（aka-only-server の main の 2a6dcf8 以降）。それより前の版では、aka の監査ログにトレースID が残らない。
+- aka-vecgen の管理API 0.2.0 以降（aka-vecgen の main の 2a6dcf8 以降）。それより前の版では、aka の監査ログにトレースID が残らない。
 
 ### 1.1 証明書
 
@@ -44,41 +44,41 @@ CA は使わない。サーバー証明書は自己署名（または持ち込�
 | 証明書 | provisioner での置き場所 | 作り方 | 相手側での扱い |
 |---|---|---|---|
 | provisioner のサーバー証明書 | ボリューム `provisioner-data`（自動生成） | 初回起動時に自己署名を作る。SAN は `PROVISIONER_TLS_HOSTS` | `server-cert` で取り出し、管理クライアント（BFF など）が信頼する証明書にする |
-| provisioner のクライアント証明書 | `certs/client.pem` | `eapaka-provisioner gen-client-cert`（2.2） | フィンガープリントを、本PoCの `PROVISIONING_API_ADMIN_CLIENTS` と aka-only-server の `AKA_ADMIN_CLIENTS` の両方に登録する |
+| provisioner のクライアント証明書 | `certs/client.pem` | `aka-provisioner gen-client-cert`（2.2） | フィンガープリントを、本PoCの `PROVISIONING_API_ADMIN_CLIENTS` と aka-vecgen の `VECGEN_ADMIN_CLIENTS` の両方に登録する |
 | provisioning-api のサーバー証明書 | `certs/prov-server.pem` | 本PoC側で openssl で作る（B-02 §15.2） | ― |
-| aka-only-server の管理API のサーバー証明書 | `certs/aka-server.pem` | aka-only-server が自動生成する。`admin-cert` で取り出す | ― |
+| aka-vecgen の管理API のサーバー証明書 | `certs/aka-server.pem` | aka-vecgen が自動生成する。`admin-cert` で取り出す | ― |
 | 管理クライアント（BFF など）のクライアント証明書 | ― | 管理クライアント側で作る | フィンガープリントを provisioner の `PROVISIONER_ADMIN_CLIENTS` に登録する |
 
 ### 1.2 ほかの操作手段との併用
 
-provisioner は、同じ IMSI の操作が重ならないよう IMSI ごとにロックを取るが、このロックは provisioner を通る操作どうしでだけ効く。本PoCの Admin TUI、aka-only-server の管理 GUI（web-gui-for-aka-only-server）、下流の API を直接呼ぶ操作とは排他できない。provisioner を使う間は、同じ加入者をそれらで操作しない。
+provisioner は、同じ IMSI の操作が重ならないよう IMSI ごとにロックを取るが、このロックは provisioner を通る操作どうしでだけ効く。本PoCの Admin TUI、aka-vecgen の管理 GUI（web-gui-for-aka-only-server）、下流の API を直接呼ぶ操作とは排他できない。provisioner を使う間は、同じ加入者をそれらで操作しない。
 
 - 本PoCの Admin TUI での CSV の一括登録など、provisioner にない操作は Admin TUI で行ってよい。ただし、鍵を置く場所（4 章）を間違えると認証できないので、`GET /subscribers/{imsi}` の `issues` で確かめる。
-- vector-gateway の AVクライアントの登録・変更は、aka-only-server の管理 GUI かコマンドで行う（provisioner は参照だけ）。
+- vector-gateway の AVクライアントの登録・変更は、aka-vecgen の管理 GUI かコマンドで行う（provisioner は参照だけ）。
 
 ## 2. 導入（同一ホスト）
 
-本PoCと aka-only-server と同じホストで動かす場合の手順を示す。別のホストの場合は 3 章を参照。
+本PoCと aka-vecgen と同じホストで動かす場合の手順を示す。別のホストの場合は 3 章を参照。
 
 以下では、3 つのリポジトリを同じディレクトリに並べて置く。
 
 ```
-~/eapaka-radius-server-poc/   本PoC（B-02 の手順で導入済み）
-~/aka-only-server/            aka-only-server（README の手順で導入済み）
-~/eapaka-node-provisioner/    このリポジトリ
+~/aka-radius/   本PoC（B-02 の手順で導入済み）
+~/aka-vecgen/            aka-vecgen（README の手順で導入済み）
+~/aka-provisioner/    このリポジトリ
 ```
 
 前提:
 
-- 本PoCは、vector-gateway を aka-only-server の AVクライアントとして接続済みであること（B-02 §14。`.env` の `VECTOR_GATEWAY_PLMN_MAP` で `01` を指定した PLMN の加入者の鍵を aka-only-server に置く）。aka-only-server を使わない場合は、2.3 を飛ばし、2.6 で aka の設定を空のままにする。
-- aka-only-server は起動済みであること（共有ネットワーク `aka-av` を作るため）。
+- 本PoCは、vector-gateway を aka-vecgen の AVクライアントとして接続済みであること（B-02 §14。`.env` の `VECTOR_GATEWAY_PLMN_MAP` で `01` を指定した PLMN の加入者の鍵を aka-vecgen に置く）。aka-vecgen を使わない場合は、2.3 を飛ばし、2.6 で aka の設定を空のままにする。
+- aka-vecgen は起動済みであること（共有ネットワーク `aka-av` を作るため）。
 
 同じホストでは、provisioner のコンテナは下流の compose が作る共有の Docker ネットワークに参加し、ホスト名で下流に接続する。
 
 | 下流 | 共有ネットワーク（既定の名前） | 作られるとき | provisioner からの URL |
 |---|---|---|---|
 | 本PoCの provisioning-api | `eapaka-prov` | 本PoCを `--profile provisioning` で起動したとき | `https://provisioning-api:9444/admin/v1` |
-| aka-only-server の管理API | `aka-av` | aka-only-server を起動したとき | `https://aka-only-server:9443/admin/v1` |
+| aka-vecgen の管理API | `aka-av` | aka-vecgen を起動したとき | `https://aka-vecgen:9443/admin/v1` |
 
 共有ネットワークに参加するのは provisioner だけで、provisioner 専用の Valkey は参加しない。
 
@@ -89,11 +89,11 @@ cd ~
 ```
 
 ```bash
-git clone https://github.com/oyaguma3/eapaka-node-provisioner.git
+git clone https://github.com/oyaguma3/aka-provisioner.git
 ```
 
 ```bash
-cd ~/eapaka-node-provisioner
+cd ~/aka-provisioner
 ```
 
 ```bash
@@ -121,7 +121,7 @@ mkdir -p certs
 ```
 
 ```bash
-docker compose -f compose.yaml run --rm --no-deps -T eapaka-provisioner gen-client-cert -name provisioner > certs/client.pem 2> gen.txt
+docker compose -f compose.yaml run --rm --no-deps -T aka-provisioner gen-client-cert -name provisioner > certs/client.pem 2> gen.txt
 ```
 
 ```bash
@@ -132,31 +132,31 @@ cat gen.txt
 クライアント証明書を作りました（CN=provisioner、有効期限 2029-01-11）。
 SHA-256 フィンガープリント: 9433c7bb...ebc28b
 下流の .env に次の値を登録してください（他の登録があればカンマ区切りで加える）:
-  本PoC（eapaka-radius-server-poc）:
+  本PoC（aka-radius）:
 PROVISIONING_API_ADMIN_CLIENTS=provisioner=9433c7bb...ebc28b
-  aka-only-server（鍵を aka-only-server に置く加入者を扱う場合）:
-AKA_ADMIN_CLIENTS=provisioner=9433c7bb...ebc28b
+  aka-vecgen（鍵を aka-vecgen に置く加入者を扱う場合）:
+VECGEN_ADMIN_CLIENTS=provisioner=9433c7bb...ebc28b
 ```
 
 - 1 つの証明書を、下流 2 つの両方に登録して使う（2.3、2.4）。
 - 有効期間は既定で 825 日（`-days` で変えられる）。期限が切れると下流に拒否されるので、それまでに作り直して登録し直す。
 - 証明書と秘密鍵を別のファイルにしたい場合は、`-out-cert` / `-out-key` で書き出し、`.env` の `PROVISIONER_CLIENT_KEY` に秘密鍵のコンテナ内のパス（`/certs/...`）を書く。
-- 使い方は `docker compose -f compose.yaml run --rm --no-deps -T eapaka-provisioner gen-client-cert -h` で表示できる。
+- 使い方は `docker compose -f compose.yaml run --rm --no-deps -T aka-provisioner gen-client-cert -h` で表示できる。
 
-### 2.3 aka-only-server 側: provisioner を登録する
+### 2.3 aka-vecgen 側: provisioner を登録する
 
-aka-only-server のディレクトリで作業する（aka-only-server の運用ガイド 3 章）。
+aka-vecgen のディレクトリで作業する（aka-vecgen の運用ガイド 3 章）。
 
-1. `.env` の `AKA_ADMIN_CLIENTS` に、2.2 で表示された `AKA_ADMIN_CLIENTS=` の行の値を書く。ほかの管理クライアント（aka-only-server の管理 GUI など）が既にあれば、カンマで区切って加える。
+1. `.env` の `VECGEN_ADMIN_CLIENTS` に、2.2 で表示された `VECGEN_ADMIN_CLIENTS=` の行の値を書く。ほかの管理クライアント（aka-vecgen の管理 GUI など）が既にあれば、カンマで区切って加える。
 
    ```
-   AKA_ADMIN_CLIENTS=aka-webgui=<既存の値>,provisioner=9433c7bb...ebc28b
+   VECGEN_ADMIN_CLIENTS=aka-webgui=<既存の値>,provisioner=9433c7bb...ebc28b
    ```
 
 2. 起動し直す。
 
    ```bash
-   cd ~/aka-only-server
+   cd ~/aka-vecgen
    ```
 
    ```bash
@@ -166,22 +166,22 @@ aka-only-server のディレクトリで作業する（aka-only-server の運用
 3. 管理API のサーバー証明書を、provisioner の `certs/aka-server.pem` に取り出す。
 
    ```bash
-   docker compose exec -T aka-only-server /aka-only-server admin-cert > ../eapaka-node-provisioner/certs/aka-server.pem
+   docker compose exec -T aka-vecgen /aka-vecgen admin-cert > ../aka-provisioner/certs/aka-server.pem
    ```
 
-   同じホストでは、provisioner はホスト名 `aka-only-server` でサーバー証明書を検証する。`aka-only-server` は aka-only-server の `.env` の `AKA_ADMIN_TLS_HOSTS` の既定値に入っている。
+   同じホストでは、provisioner はホスト名 `aka-vecgen` でサーバー証明書を検証する。`aka-vecgen` は aka-vecgen の `.env` の `VECGEN_ADMIN_TLS_HOSTS` の既定値に入っている。
 
 4. vector-gateway の AVクライアントID を確かめる。vector-gateway に設定したクライアント証明書（本PoCの `deployments/certs/av-client.pem`）のフィンガープリントと同じものの ID を使う（2.6 の `PROVISIONER_AKA_AV_CLIENT_ID`）。
 
    ```bash
-   docker compose exec -T aka-only-server /aka-only-server client list
+   docker compose exec -T aka-vecgen /aka-vecgen client list
    ```
 
    ```
    1	name=vector-gateway	enabled=true	network-name=""	not-after=2029-01-11T17:47:53Z	fingerprint=11fbbf25...59da033
    ```
 
-   aka-only-server の管理 GUI の AVクライアントの一覧でも確かめられる。
+   aka-vecgen の管理 GUI の AVクライアントの一覧でも確かめられる。
 
 ### 2.4 本PoC側: provisioner を登録して provisioning-api を起動する
 
@@ -190,7 +190,7 @@ aka-only-server のディレクトリで作業する（aka-only-server の運用
 1. provisioning-api のサーバー証明書がまだなければ作る（B-02 §15.2）。SAN には、provisioner が接続に使う名前 `DNS:provisioning-api` を必ず入れる（provisioner はホスト名を検証する）。別ホストの provisioner からも使う場合は、そのときに接続に使う VPN 側のアドレスも入れておく（3 章）。
 
    ```bash
-   cd ~/eapaka-radius-server-poc/deployments
+   cd ~/aka-radius/deployments
    ```
 
    ```bash
@@ -224,7 +224,7 @@ aka-only-server のディレクトリで作業する（aka-only-server の運用
 4. provisioning-api のサーバー証明書を、provisioner の `certs/prov-server.pem` に写す。
 
    ```bash
-   cp certs/provisioning/server.pem ~/eapaka-node-provisioner/certs/prov-server.pem
+   cp certs/provisioning/server.pem ~/aka-provisioner/certs/prov-server.pem
    ```
 
 5. `.env` の `VECTOR_GATEWAY_PLMN_MAP` の値を控える（2.6 の `PROVISIONER_PLMN_MAP` に同じ値を書く）。
@@ -242,7 +242,7 @@ aka-only-server のディレクトリで作業する（aka-only-server の運用
 provisioner のコンテナは UID 65532 で動くので、`certs/` のファイルの所有者をこの UID にして、パーミッションを 600 にする。
 
 ```bash
-cd ~/eapaka-node-provisioner
+cd ~/aka-provisioner
 ```
 
 ```bash
@@ -273,7 +273,7 @@ ls -l certs
 |---|---|---|
 | `COMPOSE_FILE` | 重ねる compose ファイル。同一ホストの下流ごとに共有ネットワークの設定を重ねる（既定は両方） | `compose.yaml:compose.eapaka-prov.yaml:compose.aka-av.yaml` |
 | `PROVISIONER_ADMIN_CLIENTS` | 管理クライアント（BFF など）の `識別名=フィンガープリント`（2.8）。1 つもなければ provisioner は起動しない | `bff=4bb320e6...2a2e2806` |
-| `PROVISIONER_AKA_URL` | aka-only-server の管理API。aka-only-server を使わない場合は空 | `https://aka-only-server:9443/admin/v1` |
+| `PROVISIONER_AKA_URL` | aka-vecgen の管理API。aka-vecgen を使わない場合は空 | `https://aka-vecgen:9443/admin/v1` |
 | `PROVISIONER_AKA_AV_CLIENT_ID` | vector-gateway の AVクライアントID（2.3 の 4） | `1` |
 | `PROVISIONER_PLMN_MAP` | 本PoCの `VECTOR_GATEWAY_PLMN_MAP` と同じ値（2.4 の 5。4 章） | `44020:01` |
 
@@ -281,24 +281,24 @@ ls -l certs
 
 ### 2.7 起動して確かめる
 
-本PoC（`--profile provisioning`）と aka-only-server が先に起動している必要がある（共有ネットワークをそれぞれの compose が作るため）。
+本PoC（`--profile provisioning`）と aka-vecgen が先に起動している必要がある（共有ネットワークをそれぞれの compose が作るため）。
 
 ```bash
 docker compose up -d
 ```
 
-`docker compose ps` で `eapaka-provisioner` が healthy になる（compose の healthcheck は `eapaka-provisioner healthcheck` で、API の待ち受けに TCP で接続できるかを見る。下流の状態は次の起動ログと `check-downstream` で見る）。
+`docker compose ps` で `aka-provisioner` が healthy になる（compose の healthcheck は `aka-provisioner healthcheck` で、API の待ち受けに TCP で接続できるかを見る。下流の状態は次の起動ログと `check-downstream` で見る）。
 
 起動ログに、下流 2 つと vector-gateway の AVクライアントの確認の結果が出る。
 
 ```bash
-docker compose logs eapaka-provisioner
+docker compose logs aka-provisioner
 ```
 
 ```
 {"level":"INFO","msg":"plmn map","entries":"44020=aka"}
 {"level":"INFO","msg":"provisioning-api is available","server_version":"0.4.0","node_name":"simwifi"}
-{"level":"INFO","msg":"aka-only-server is available","server_version":"dev"}
+{"level":"INFO","msg":"aka-vecgen is available","server_version":"dev"}
 {"level":"INFO","msg":"av client of vector-gateway","av_client_id":1,"name":"vector-gateway"}
 {"level":"INFO","msg":"listening","addr":"[::]:9446"}
 ```
@@ -306,7 +306,7 @@ docker compose logs eapaka-provisioner
 下流に接続できなくても provisioner は起動する（その場合は WARN と原因の見当 `hint` が出る。10 章）。導入時や設定を変えた後は、`check-downstream` でも確かめられる。
 
 ```bash
-docker compose exec -T eapaka-provisioner /eapaka-provisioner check-downstream
+docker compose exec -T aka-provisioner /aka-provisioner check-downstream
 ```
 
 ```
@@ -316,8 +316,8 @@ PLMN マップ: 44020=aka
 本PoCの Provisioning API: https://provisioning-api:9444/admin/v1
   接続できました。provisioning-api 0.4.0（ノード simwifi、加入者 0、RADIUSクライアント 0、認可ポリシー 0）
 
-aka-only-server の管理API: https://aka-only-server:9443/admin/v1
-  接続できました。aka-only-server dev（加入者 0、AVクライアント 1）
+aka-vecgen の管理API: https://aka-vecgen:9443/admin/v1
+  接続できました。aka-vecgen dev（加入者 0、AVクライアント 1）
   vector-gateway の AVクライアント: ID 1（vector-gateway、証明書の有効期限 2029-01-11）
 ```
 
@@ -330,11 +330,11 @@ aka-only-server の管理API: https://aka-only-server:9443/admin/v1
 provisioner のサーバー証明書（自己署名）を取り出して、管理クライアントが信頼する証明書にする。標準エラーに SAN とフィンガープリントが出る。
 
 ```bash
-docker compose exec -T eapaka-provisioner /eapaka-provisioner server-cert > provisioner-server.pem
+docker compose exec -T aka-provisioner /aka-provisioner server-cert > provisioner-server.pem
 ```
 
 ```
-SAN: localhost, eapaka-provisioner, 127.0.0.1、有効期限 2036-10-06
+SAN: localhost, aka-provisioner, 127.0.0.1、有効期限 2036-10-06
 SHA-256 フィンガープリント: 44838a94...541dbbef
 ```
 
@@ -351,9 +351,9 @@ docker compose up -d
 
 #### 同じホストの管理クライアント
 
-provisioner の compose は、同一ホストの管理クライアント向けの共有ネットワーク（既定の名前は `eapaka-provisioner`、変数 `PROVISIONER_SHARED_NETWORK`）を作り、provisioner だけを参加させる。同じホストで別の compose として動く管理クライアントは、ここに外部ネットワークとして参加し、`https://eapaka-provisioner:9446/admin/v1` で接続する。ホスト側に公開したポート（`127.0.0.1:9446`）には、別のコンテナからは届かない。
+provisioner の compose は、同一ホストの管理クライアント向けの共有ネットワーク（既定の名前は `aka-provisioner`、変数 `PROVISIONER_SHARED_NETWORK`）を作り、provisioner だけを参加させる。同じホストで別の compose として動く管理クライアントは、ここに外部ネットワークとして参加し、`https://aka-provisioner:9446/admin/v1` で接続する。ホスト側に公開したポート（`127.0.0.1:9446`）には、別のコンテナからは届かない。
 
-本PoCの管理 GUI（web-gui-for-eapaka-radius）は、provisioner 経由でつなぐ設定を持っている（その運用ガイドの 11 章。同一ホスト用の `compose.eapaka-provisioner.yaml`、直接接続からの切り替え、別ホスト、戻し方）。2026-10-10 に、本書の構成と合わせて検証機で確かめた。
+本PoCの管理 GUI（web-gui-for-eapaka-radius）は、provisioner 経由でつなぐ設定を持っている（その運用ガイドの 11 章。同一ホスト用の `compose.aka-provisioner.yaml`、直接接続からの切り替え、別ホスト、戻し方）。2026-10-10 に、本書の構成と合わせて検証機で確かめた。
 
 管理クライアント側の compose の例（サービス名・イメージ等は管理クライアント側の手順に従う）:
 
@@ -363,15 +363,15 @@ services:
     # （イメージ・環境変数・ボリューム等は管理クライアント側の手順に従う）
     networks:
       - default              # 管理クライアント側の他のコンテナ（専用の Valkey 等）と通信するため
-      - eapaka-provisioner   # provisioner に接続するため
+      - aka-provisioner   # provisioner に接続するため
 
 networks:
-  eapaka-provisioner:
+  aka-provisioner:
     external: true
-    name: eapaka-provisioner   # provisioner 側の PROVISIONER_SHARED_NETWORK と同じ名前
+    name: aka-provisioner   # provisioner 側の PROVISIONER_SHARED_NETWORK と同じ名前
 ```
 
-- サーバー証明書の SAN の既定値（`PROVISIONER_TLS_HOSTS`）に `eapaka-provisioner` が入っているので、ホスト名の検証が通る。
+- サーバー証明書の SAN の既定値（`PROVISIONER_TLS_HOSTS`）に `aka-provisioner` が入っているので、ホスト名の検証が通る。
 - 共有ネットワークは provisioner の compose が作るので、provisioner を先に起動する。
 - 共有ネットワークから名前で解決できるのは provisioner だけで、provisioner 専用の Valkey や下流には届かない（2026-10-10 に確認）。
 - 管理クライアントの専用の Valkey など、provisioner に接続しないコンテナは共有ネットワークに参加させない。provisioner は `valkey` という名前で専用の Valkey に接続しているため、似た名前のコンテナを共有ネットワークに入れると名前解決で取り違えるおそれがある。
@@ -379,11 +379,11 @@ networks:
 接続の確認は、curl のコンテナを管理クライアントに見立てて行える。確認用のディレクトリに、provisioner のサーバー証明書（`provisioner-server.pem`）と、登録した管理クライアントの証明書・秘密鍵（例 `bff.pem`。証明書と秘密鍵を 1 つにしたもの）を置いて実行する。`--user` は、`bff.pem` を読めるホストのユーザーの UID:GID にする。
 
 ```bash
-docker run --rm --network eapaka-provisioner --user "$(id -u):$(id -g)" -v "$PWD:/c:ro" curlimages/curl:8.11.1 -sS --cacert /c/provisioner-server.pem --cert /c/bff.pem --key /c/bff.pem https://eapaka-provisioner:9446/admin/v1/status
+docker run --rm --network aka-provisioner --user "$(id -u):$(id -g)" -v "$PWD:/c:ro" curlimages/curl:8.11.1 -sS --cacert /c/provisioner-server.pem --cert /c/bff.pem --key /c/bff.pem https://aka-provisioner:9446/admin/v1/status
 ```
 
 ```json
-{"version":"dev","startedAt":"...","plmnMap":[{"plmn":"44020","keyStore":"aka"}],"downstreams":{"prov":{"configured":true,"url":"https://provisioning-api:9444/admin/v1","reachable":true,"version":"0.4.0","nodeName":"simwifi","subscriberCount":0},"aka":{"configured":true,"url":"https://aka-only-server:9443/admin/v1","reachable":true,"version":"dev","subscriberCount":0}},"avClient":{"id":1,"exists":true,"enabled":true,"name":"vector-gateway"},"valkey":{"reachable":true},"operations":{"running":0,"retrying":0,"failed":0}}
+{"version":"dev","startedAt":"...","plmnMap":[{"plmn":"44020","keyStore":"aka"}],"downstreams":{"prov":{"configured":true,"url":"https://provisioning-api:9444/admin/v1","reachable":true,"version":"0.4.0","nodeName":"simwifi","subscriberCount":0},"aka":{"configured":true,"url":"https://aka-vecgen:9443/admin/v1","reachable":true,"version":"dev","subscriberCount":0}},"avClient":{"id":1,"exists":true,"enabled":true,"name":"vector-gateway"},"valkey":{"reachable":true},"operations":{"running":0,"retrying":0,"failed":0}}
 ```
 
 確認が終わったら、管理クライアントの秘密鍵を含む確認用のディレクトリを消す。
@@ -393,7 +393,7 @@ docker run --rm --network eapaka-provisioner --user "$(id -u):$(id -g)" -v "$PWD
 provisioner の API の使い方は API 仕様（`docs/openapi/provisioner-api.yaml`）を参照。以下は、2.8 の curl のコンテナで、本PoCの RADIUSクライアントと、鍵の置き場所の違う 2 人の加入者を作る例である（`44020` を `01` にした PLMN マップの場合）。長くなるので、curl のコンテナの呼び出しをシェルの関数にしておく。
 
 ```bash
-pv() { m=$1; p=$2; shift 2; docker run --rm --network eapaka-provisioner --user "$(id -u):$(id -g)" -v "$PWD:/c:ro" curlimages/curl:8.11.1 -sS --cacert /c/provisioner-server.pem --cert /c/bff.pem --key /c/bff.pem -H 'X-Operator-Id: tester01' -H 'Content-Type: application/json' -X "$m" "https://eapaka-provisioner:9446/admin/v1$p" "$@"; }
+pv() { m=$1; p=$2; shift 2; docker run --rm --network aka-provisioner --user "$(id -u):$(id -g)" -v "$PWD:/c:ro" curlimages/curl:8.11.1 -sS --cacert /c/provisioner-server.pem --cert /c/bff.pem --key /c/bff.pem -H 'X-Operator-Id: tester01' -H 'Content-Type: application/json' -X "$m" "https://aka-provisioner:9446/admin/v1$p" "$@"; }
 ```
 
 RADIUSクライアント（AP）を登録する。中継なので、本文は本PoCの Provisioning API と同じ形である。
@@ -402,7 +402,7 @@ RADIUSクライアント（AP）を登録する。中継なので、本文は本
 pv POST /clients -d '{"ip":"192.0.2.10","secret":"<共有シークレット>","name":"ap-01"}'
 ```
 
-鍵を本PoCに置く加入者（PLMN `44010`）と、aka-only-server に置く加入者（PLMN `44020`）を作る。置き場所は PLMN マップから決まる（`keyStore` は省略できる）。
+鍵を本PoCに置く加入者（PLMN `44010`）と、aka-vecgen に置く加入者（PLMN `44020`）を作る。置き場所は PLMN マップから決まる（`keyStore` は省略できる）。
 
 ```bash
 pv POST /subscribers -d '{"imsi":"440100123456789","ki":"<Ki>","opc":"<OPc>","policy":{"default":"allow","rules":[]}}'
@@ -455,7 +455,7 @@ provisioner と下流を別のホストで動かす場合は、下流の管理AP
 
 下流ごとに同一ホスト・別ホストを選べる。`.env` の `COMPOSE_FILE` には、同一ホストの下流の設定だけを重ねる。
 
-| 本PoC | aka-only-server | `COMPOSE_FILE` |
+| 本PoC | aka-vecgen | `COMPOSE_FILE` |
 |---|---|---|
 | 同一ホスト | 同一ホスト | `compose.yaml:compose.eapaka-prov.yaml:compose.aka-av.yaml` |
 | 同一ホスト | 別ホスト | `compose.yaml:compose.eapaka-prov.yaml` |
@@ -471,13 +471,13 @@ provisioner と下流を別のホストで動かす場合は、下流の管理AP
    docker compose --profile provisioning up -d provisioning-api
    ```
 
-### 3.2 aka-only-server 側
+### 3.2 aka-vecgen 側
 
-1. `.env` の `AKA_ADMIN_PUBLISH` を `100.64.0.20:9443` にし、`AKA_ADMIN_TLS_HOSTS` に `100.64.0.20` を加える。
+1. `.env` の `VECGEN_ADMIN_PUBLISH` を `100.64.0.20:9443` にし、`VECGEN_ADMIN_TLS_HOSTS` に `100.64.0.20` を加える。
 
    ```
-   AKA_ADMIN_PUBLISH=100.64.0.20:9443
-   AKA_ADMIN_TLS_HOSTS=localhost,127.0.0.1,aka-only-server,100.64.0.20
+   VECGEN_ADMIN_PUBLISH=100.64.0.20:9443
+   VECGEN_ADMIN_TLS_HOSTS=localhost,127.0.0.1,aka-vecgen,100.64.0.20
    ```
 
 2. 作り直す。
@@ -486,14 +486,14 @@ provisioner と下流を別のホストで動かす場合は、下流の管理AP
    docker compose up -d
    ```
 
-3. 管理API のサーバー証明書は生成済みのものに SAN が反映されないので、作り直して再起動する（aka-only-server の運用ガイド 2.1）。`admin-cert reset` は新しい証明書を標準出力に出すので、それを provisioner に渡す。同じ証明書を使っているほかの管理クライアント（aka-only-server の管理 GUI など）にも渡し直す。
+3. 管理API のサーバー証明書は生成済みのものに SAN が反映されないので、作り直して再起動する（aka-vecgen の運用ガイド 2.1）。`admin-cert reset` は新しい証明書を標準出力に出すので、それを provisioner に渡す。同じ証明書を使っているほかの管理クライアント（aka-vecgen の管理 GUI など）にも渡し直す。
 
    ```bash
-   docker compose exec -T aka-only-server /aka-only-server admin-cert reset > aka-server.pem
+   docker compose exec -T aka-vecgen /aka-vecgen admin-cert reset > aka-server.pem
    ```
 
    ```bash
-   docker compose restart aka-only-server
+   docker compose restart aka-vecgen
    ```
 
 ### 3.3 provisioner 側
@@ -510,7 +510,7 @@ provisioner と下流を別のホストで動かす場合は、下流の管理AP
 
 4. 起動して、2.7 のとおり確かめる。
 
-- `COMPOSE_FILE=compose.yaml` だけの構成では、provisioner は下流の共有ネットワークに参加しない（provisioner 自身の default と `eapaka-provisioner` だけ）。下流のホストの VPN 側のアドレスで接続できることを確かめた（2026-10-10）。
+- `COMPOSE_FILE=compose.yaml` だけの構成では、provisioner は下流の共有ネットワークに参加しない（provisioner 自身の default と `aka-provisioner` だけ）。下流のホストの VPN 側のアドレスで接続できることを確かめた（2026-10-10）。
 - 下流のログの `src_ip` は、provisioner のアドレスではなく、下流の compose ネットワークのゲートウェイのアドレスになることがある。下流で provisioner を見分けるのは `mgmt_client`（2.2 の識別名）である。
 
 ### 3.4 別ホストの管理クライアントから接続する
@@ -521,7 +521,7 @@ provisioner と下流を別のホストで動かす場合は、下流の管理AP
 
    ```
    PROVISIONER_PUBLISH=100.64.0.30:9446
-   PROVISIONER_TLS_HOSTS=localhost,127.0.0.1,eapaka-provisioner,100.64.0.30
+   PROVISIONER_TLS_HOSTS=localhost,127.0.0.1,aka-provisioner,100.64.0.30
    ```
 
 2. 自己署名のサーバー証明書は生成済みのものに SAN が反映されないので、ボリューム `provisioner-data`（サーバー証明書だけが入っている）を消して作り直す。ボリュームの実際の名前は `<プロジェクト名>_provisioner-data`（プロジェクト名は既定ではディレクトリ名）。
@@ -531,7 +531,7 @@ provisioner と下流を別のホストで動かす場合は、下流の管理AP
    ```
 
    ```bash
-   docker volume rm eapaka-node-provisioner_provisioner-data
+   docker volume rm aka-provisioner_provisioner-data
    ```
 
    ```bash
@@ -548,7 +548,7 @@ provisioner と下流を別のホストで動かす場合は、下流の管理AP
 
 | PLMN マップの接続方式 | 鍵の置き場所（`keyStore`） | 鍵の操作先 |
 |---|---|---|
-| `01` | `aka` | aka-only-server の管理API |
+| `01` | `aka` | aka-vecgen の管理API |
 | `00`、またはマップにない | `poc` | 本PoCの Provisioning API |
 
 - IMSI の先頭 6 桁、次に先頭 5 桁の順でマップと照合する。認可ポリシーは、置き場所によらず本PoCに置く。
@@ -557,11 +557,11 @@ provisioner と下流を別のホストで動かす場合は、下流の管理AP
 - マップに `00` / `01` 以外の接続方式があるとき、`01` があるのに `PROVISIONER_AKA_URL` が空のとき、`PROVISIONER_AKA_URL` があるのに `PROVISIONER_AKA_AV_CLIENT_ID` が空のときは、設定の誤りとして provisioner は起動しない。
 - PLMN マップを変えても、既にいる加入者の鍵は移らない。本PoCと provisioner の両方のマップを変えた後は、`GET /subscribers/{imsi}` の `issues` に `KEY_MISSING`（置き場所に鍵がない）や `KEY_IN_OTHER_STORE`（置き場所でない方に鍵がある）が出るので、加入者を作り直す。
 
-`PROVISIONER_AKA_AV_CLIENT_ID` には、vector-gateway が aka-only-server に登録されている AVクライアントの ID を書く（2.3 の 4）。
+`PROVISIONER_AKA_AV_CLIENT_ID` には、vector-gateway が aka-vecgen に登録されている AVクライアントの ID を書く（2.3 の 4）。
 
 - `aka` の加入者を作るとき、許可するクライアントをこの ID だけにする。変更では、許可するクライアントを変えない。
-- 起動時と `/status` で、この ID の AVクライアントがあって有効かを確かめる。ない・無効の場合も provisioner は起動するが、`aka` の加入者の作成は aka-only-server に断られる（502）。`check-downstream` と `/status` の `avClient` で確かめる。
-- vector-gateway の証明書を更新するときは、aka-only-server の管理API（`PUT /admin/v1/clients/{clientId}/certificate`）で差し替える。ID が変わらないので、provisioner の設定と加入者の許可はそのまま使える（aka-only-server の運用ガイド 2.3）。
+- 起動時と `/status` で、この ID の AVクライアントがあって有効かを確かめる。ない・無効の場合も provisioner は起動するが、`aka` の加入者の作成は aka-vecgen に断られる（502）。`check-downstream` と `/status` の `avClient` で確かめる。
+- vector-gateway の証明書を更新するときは、aka-vecgen の管理API（`PUT /admin/v1/clients/{clientId}/certificate`）で差し替える。ID が変わらないので、provisioner の設定と加入者の許可はそのまま使える（aka-vecgen の運用ガイド 2.3）。
 
 `GET /subscribers/{imsi}` の `issues` は、2 つのノードの食い違いを示す。正常なら空である。
 
@@ -570,7 +570,7 @@ provisioner と下流を別のホストで動かす場合は、下流の管理AP
 | `KEY_MISSING` | 置き場所に鍵がない | 加入者を作り直す（ポリシーだけ残っている場合は、削除してから作る） |
 | `POLICY_MISSING` | 認可ポリシーがない（本PoCは認証を拒否する） | `PATCH /subscribers/{imsi}` で `policy` を設定する |
 | `KEY_IN_OTHER_STORE` | 置き場所でない方にも同じ IMSI の加入者がある | PLMN マップの食い違いか、ほかの操作手段での登録を疑う。要らない方を下流の GUI 等で消す |
-| `AV_CLIENT_NOT_ALLOWED` | `aka` の加入者が vector-gateway の AVクライアントを許可していない | aka-only-server の管理 GUI 等で許可するクライアントに加える |
+| `AV_CLIENT_NOT_ALLOWED` | `aka` の加入者が vector-gateway の AVクライアントを許可していない | aka-vecgen の管理 GUI 等で許可するクライアントに加える |
 | `OTHER_STORE_UNREACHABLE` | 置き場所でない方の下流に接続できず、`KEY_IN_OTHER_STORE` を確かめられなかった | 下流への接続を確かめる（10 章） |
 
 ## 5. 公開範囲
@@ -581,7 +581,7 @@ Docker が公開したポートは、ufw の規則を通らずに外部から届
 |---|---|---|
 | `PROVISIONER_PUBLISH` | `127.0.0.1:9446` | 同じホストの管理クライアントは共有ネットワークで接続するので、このままでよい。別ホストの管理クライアントがある場合だけ、VPN 側のアドレスにする（3.4） |
 | 本PoCの `PROVISIONING_API_BIND` | `127.0.0.1` | provisioner が別ホストにある場合だけ、VPN 側のアドレスにする（3.1） |
-| aka-only-server の `AKA_ADMIN_PUBLISH` | `127.0.0.1:9443` | provisioner が別ホストにある場合だけ、VPN 側のアドレスにする（3.2） |
+| aka-vecgen の `VECGEN_ADMIN_PUBLISH` | `127.0.0.1:9443` | provisioner が別ホストにある場合だけ、VPN 側のアドレスにする（3.2） |
 
 - provisioner の API は mTLS で、登録していない証明書や証明書なしの接続は TLS ハンドシェイクで拒否する。管理クライアントは全権を持つ（ユーザーや権限の概念は provisioner にない）。
 - インターネットに面したホストでは、`0.0.0.0` にしない。
@@ -666,13 +666,13 @@ pv POST /operations/<operationId>/dismiss
 
 | 種類 | 内容 | 見る場所 |
 |---|---|---|
-| provisioner のログ | 要求ごとの `request completed`（トレースID つき）、下流の呼び出しの失敗、補償・やり直しの経過、起動時の下流の確認、接続の拒否 | `docker compose logs eapaka-provisioner`（標準出力の JSON） |
+| provisioner のログ | 要求ごとの `request completed`（トレースID つき）、下流の呼び出しの失敗、補償・やり直しの経過、起動時の下流の確認、接続の拒否 | `docker compose logs aka-provisioner`（標準出力の JSON） |
 | provisioner の監査ログ | 変更操作、加入者の作成・変更・削除で書き込みを始めた後の失敗、秘密の値（Ki / OPc、共有シークレット）の取得、操作の記録への対応 | `GET /audit-logs`（`PROVISIONER_AUDIT_MAX` 件、既定 10000 件まで）。標準出力にも `"msg":"audit"` で出る |
 | 本PoCの provisioning-api の監査ログ | provisioner が行った下流の操作（`mgmt_client` は provisioner の識別名、`operator` は `X-Operator-Id`） | `GET /prov/audit-logs`。すべては本PoCのホストの `deployments/logs_on_host/provisioning-api.log` |
-| aka-only-server の監査ログ | 同上 | `GET /aka/audit-logs`。aka-only-server の運用ガイド 6 章 |
+| aka-vecgen の監査ログ | 同上 | `GET /aka/audit-logs`。aka-vecgen の運用ガイド 6 章 |
 
 ```bash
-docker compose logs -f eapaka-provisioner
+docker compose logs -f aka-provisioner
 ```
 
 - provisioner は、操作ごとのトレースID（要求の `X-Trace-ID`。なければ採番）を下流 2 つにも渡す。provisioner の監査ログの `traceId` は、下流の監査ログの `traceId` と同じになる。補償・やり直しも、元の操作のトレースID を渡す。
@@ -685,14 +685,14 @@ docker compose logs -f eapaka-provisioner
 
 ## 8. バックアップと復元
 
-provisioner のデータは 2 つのボリュームにある。加入者などのデータは下流にあるので、下流のバックアップも別に取る（本PoCは B-02 §9 と O-04、aka-only-server はその運用ガイド 7 章）。
+provisioner のデータは 2 つのボリュームにある。加入者などのデータは下流にあるので、下流のバックアップも別に取る（本PoCは B-02 §9 と O-04、aka-vecgen はその運用ガイド 7 章）。
 
 | ボリューム | 内容 | 失った場合 |
 |---|---|---|
 | `<プロジェクト名>_valkey-data` | 操作の記録、`Idempotency-Key` の記録、監査ログ | 未完了の操作の記録が消え、その補償・やり直しが行われなくなる。下流の加入者を `issues` で確かめて手で直す |
 | `<プロジェクト名>_provisioner-data` | 自己署名のサーバー証明書と秘密鍵 | 起動時に作り直される（管理クライアントに渡し直す） |
 
-以下はプロジェクト名が `eapaka-node-provisioner` の場合の例である。
+以下はプロジェクト名が `aka-provisioner` の場合の例である。
 
 ### 8.1 バックアップ
 
@@ -701,7 +701,7 @@ docker compose stop
 ```
 
 ```bash
-docker run --rm -v eapaka-node-provisioner_valkey-data:/data:ro -v "$PWD":/backup valkey/valkey:9.1.2 tar czf /backup/valkey-data.tgz -C /data .
+docker run --rm -v aka-provisioner_valkey-data:/data:ro -v "$PWD":/backup valkey/valkey:9.1.2 tar czf /backup/valkey-data.tgz -C /data .
 ```
 
 ```bash
@@ -719,7 +719,7 @@ docker compose down
 ```
 
 ```bash
-docker run --rm -v eapaka-node-provisioner_valkey-data:/data -v "$PWD":/backup valkey/valkey:9.1.2 sh -c 'rm -rf /data/* && tar xzf /backup/valkey-data.tgz -C /data'
+docker run --rm -v aka-provisioner_valkey-data:/data -v "$PWD":/backup valkey/valkey:9.1.2 sh -c 'rm -rf /data/* && tar xzf /backup/valkey-data.tgz -C /data'
 ```
 
 ```bash
@@ -751,40 +751,40 @@ PROVISIONER_VERSION=$(git rev-parse --short HEAD) docker compose up -d --build
 ```
 
 ```bash
-docker compose exec -T eapaka-provisioner /eapaka-provisioner check-downstream
+docker compose exec -T aka-provisioner /aka-provisioner check-downstream
 ```
 
-- 下流（本PoC、aka-only-server）を更新した場合も、`check-downstream` で接続を確かめる。
+- 下流（本PoC、aka-vecgen）を更新した場合も、`check-downstream` で接続を確かめる。
 - 処理中の要求があるときに作り直すと、その操作は `running` のまま残り、60 秒後にワーカーが続ける（6.1）。
 
 ## 10. 障害時の確認
 
-`docker compose ps` で `eapaka-provisioner` が unhealthy なら、API が待ち受けていない。`docker compose logs eapaka-provisioner` で起動のエラー（設定の誤り、Valkey に接続できない、証明書の読み込みの失敗など）を確かめる。
+`docker compose ps` で `aka-provisioner` が unhealthy なら、API が待ち受けていない。`docker compose logs aka-provisioner` で起動のエラー（設定の誤り、Valkey に接続できない、証明書の読み込みの失敗など）を確かめる。
 
 停止（`docker compose stop` / `down`、更新）には最大 30 秒かかる。ワーカーが処理中の操作を最後まで行ってから終わるため（`stop_grace_period`）。
 
 まず `check-downstream` で下流への接続を確かめる。接続できない場合は、原因の見当が表示される。同じ内容は `/status` の `downstreams.*.hint` と、起動ログの `hint` にも出る。
 
 ```bash
-docker compose exec -T eapaka-provisioner /eapaka-provisioner check-downstream
+docker compose exec -T aka-provisioner /aka-provisioner check-downstream
 ```
 
 ```
-aka-only-server の管理API: https://aka-only-server:9443/admin/v1
-  接続できませんでした: aka GET /admin/v1/status: Get "https://aka-only-server:9443/admin/v1/status": dial tcp: lookup aka-only-server on 127.0.0.11:53: no such host
-  aka-only-server のホスト名（aka-only-server）を解決できません。aka-only-server が起動しているか、同一ホストの場合は provisioner が共有ネットワーク（aka-av）に参加しているか確認してください。
+aka-vecgen の管理API: https://aka-vecgen:9443/admin/v1
+  接続できませんでした: aka GET /admin/v1/status: Get "https://aka-vecgen:9443/admin/v1/status": dial tcp: lookup aka-vecgen on 127.0.0.11:53: no such host
+  aka-vecgen のホスト名（aka-vecgen）を解決できません。aka-vecgen が起動しているか、同一ホストの場合は provisioner が共有ネットワーク（aka-av）に参加しているか確認してください。
 ```
 
 | 症状・表示 | 確認すること |
 |---|---|
-| provisioner が起動しない | `docker compose logs eapaka-provisioner` の `error:`。`PROVISIONER_ADMIN_CLIENTS` が空・書式の誤り、PLMN マップと aka の設定の組み合わせ（4 章）、`PROVISIONER_VALKEY_PASSWORD`、`certs/` のファイルの有無と所有者（UID 65532。`permission denied` なら 2.5） |
-| `network eapaka-prov declared as external, but could not be found`（`aka-av` も同様） | 下流を先に起動しているか（本PoCは `--profile provisioning`）。下流側と `.env` の共有ネットワークの名前（`PROVISIONING_SHARED_NETWORK` / `AKA_SHARED_NETWORK`）が一致しているか。別ホストの下流なら `COMPOSE_FILE` から外す（3 章）。クライアント証明書を作るとき（2.2）は `-f compose.yaml` を付ける |
-| 「…が provisioner のクライアント証明書を受け付けませんでした」 | 下流の `.env` の `PROVISIONING_API_ADMIN_CLIENTS` / `AKA_ADMIN_CLIENTS` に、`check-downstream` が表示するフィンガープリントが登録されているか。登録した後に下流を作り直したか。証明書が有効期間内か。下流のログ（本PoCは `PROV_CLIENT_REJECTED`、aka-only-server は `client certificate rejected`） |
-| 「…のサーバー証明書が、設定した証明書（PROVISIONER_…_SERVER_CERT）と一致しません」 | `certs/prov-server.pem` が本PoCの `server.pem` と同じか。`certs/aka-server.pem` が aka-only-server の `admin-cert` の出力と同じか（作り直した後は置き直して、provisioner を `docker compose restart eapaka-provisioner` で再起動する） |
-| サーバー証明書に接続先の名前（IP アドレス）が入っていない | 下流のサーバー証明書の SAN に、URL のホスト名（同一ホストなら `provisioning-api` / `aka-only-server`）か IP アドレスが入っているか（3.1・3.2） |
+| provisioner が起動しない | `docker compose logs aka-provisioner` の `error:`。`PROVISIONER_ADMIN_CLIENTS` が空・書式の誤り、PLMN マップと aka の設定の組み合わせ（4 章）、`PROVISIONER_VALKEY_PASSWORD`、`certs/` のファイルの有無と所有者（UID 65532。`permission denied` なら 2.5） |
+| `network eapaka-prov declared as external, but could not be found`（`aka-av` も同様） | 下流を先に起動しているか（本PoCは `--profile provisioning`）。下流側と `.env` の共有ネットワークの名前（`PROVISIONING_SHARED_NETWORK` / `VECGEN_SHARED_NETWORK`）が一致しているか。別ホストの下流なら `COMPOSE_FILE` から外す（3 章）。クライアント証明書を作るとき（2.2）は `-f compose.yaml` を付ける |
+| 「…が provisioner のクライアント証明書を受け付けませんでした」 | 下流の `.env` の `PROVISIONING_API_ADMIN_CLIENTS` / `VECGEN_ADMIN_CLIENTS` に、`check-downstream` が表示するフィンガープリントが登録されているか。登録した後に下流を作り直したか。証明書が有効期間内か。下流のログ（本PoCは `PROV_CLIENT_REJECTED`、aka-vecgen は `client certificate rejected`） |
+| 「…のサーバー証明書が、設定した証明書（PROVISIONER_…_SERVER_CERT）と一致しません」 | `certs/prov-server.pem` が本PoCの `server.pem` と同じか。`certs/aka-server.pem` が aka-vecgen の `admin-cert` の出力と同じか（作り直した後は置き直して、provisioner を `docker compose restart aka-provisioner` で再起動する） |
+| サーバー証明書に接続先の名前（IP アドレス）が入っていない | 下流のサーバー証明書の SAN に、URL のホスト名（同一ホストなら `provisioning-api` / `aka-vecgen`）か IP アドレスが入っているか（3.1・3.2） |
 | 「ホスト名を解決できません」 | 下流が起動しているか。provisioner が共有ネットワークに参加しているか（`COMPOSE_FILE`） |
-| 「時間内に応答がありません」 | 接続先のアドレス、VPN、下流側の公開先（`PROVISIONING_API_BIND`、`AKA_ADMIN_PUBLISH`） |
-| vector-gateway の AVクライアントがない・無効 | `PROVISIONER_AKA_AV_CLIENT_ID` が aka-only-server の `client list` の ID と合っているか（2.3 の 4）。AVクライアントが有効か |
+| 「時間内に応答がありません」 | 接続先のアドレス、VPN、下流側の公開先（`PROVISIONING_API_BIND`、`VECGEN_ADMIN_PUBLISH`） |
+| vector-gateway の AVクライアントがない・無効 | `PROVISIONER_AKA_AV_CLIENT_ID` が aka-vecgen の `client list` の ID と合っているか（2.3 の 4）。AVクライアントが有効か |
 | 管理クライアントが接続できない（TLS ハンドシェイクで切れる。curl は終了コード 56） | provisioner のログの `admin client certificate rejected`。`reason` が `not configured` なら `PROVISIONER_ADMIN_CLIENTS` に `fingerprint` の値が登録されていない（登録したら `docker compose up -d` で作り直す）、`outside validity period` なら期限切れ |
 | 管理クライアントがサーバー証明書の検証に失敗する | 管理クライアントの信頼する証明書が `server-cert` の出力と同じか。接続に使う名前が SAN（`server-cert` の標準エラーに出る）に入っているか（3.4） |
 | 503 `DOWNSTREAM_UNAVAILABLE` | 応答の `downstream`（`prov` / `aka`）の下流に接続できない。`check-downstream` で確かめる |
@@ -804,18 +804,18 @@ aka-only-server の管理API: https://aka-only-server:9443/admin/v1
 |---|---|---|
 | `COMPOSE_FILE` | `compose.yaml:compose.eapaka-prov.yaml:compose.aka-av.yaml` | 重ねる compose ファイル（3 章の表） |
 | `PROVISIONING_SHARED_NETWORK` | `eapaka-prov` | 同一ホストの本PoCが作る共有ネットワークの名前（本PoC側と同じにする） |
-| `AKA_SHARED_NETWORK` | `aka-av` | 同一ホストの aka-only-server が作る共有ネットワークの名前（aka-only-server 側と同じにする） |
-| `PROVISIONER_SHARED_NETWORK` | `eapaka-provisioner` | provisioner が作る、同一ホストの管理クライアント向けの共有ネットワークの名前 |
+| `VECGEN_SHARED_NETWORK` | `aka-av` | 同一ホストの aka-vecgen が作る共有ネットワークの名前（aka-vecgen 側と同じにする） |
+| `PROVISIONER_SHARED_NETWORK` | `aka-provisioner` | provisioner が作る、同一ホストの管理クライアント向けの共有ネットワークの名前 |
 | `PROVISIONER_VALKEY_PASSWORD` | （必須） | provisioner 専用の Valkey のパスワード |
 | `PROVISIONER_ADMIN_CLIENTS` | （必須） | 管理クライアントの `識別名=フィンガープリント`（カンマ区切り。識別名は英数字と `.` `_` `-` の 64 文字まで） |
 | `PROVISIONER_PROV_URL` | `https://provisioning-api:9444/admin/v1` | 本PoCの Provisioning API のベース URL |
-| `PROVISIONER_AKA_URL` | （空: aka-only-server を扱わない） | aka-only-server の管理API のベース URL |
+| `PROVISIONER_AKA_URL` | （空: aka-vecgen を扱わない） | aka-vecgen の管理API のベース URL |
 | `PROVISIONER_AKA_AV_CLIENT_ID` | （`PROVISIONER_AKA_URL` を設定したら必須） | vector-gateway の AVクライアントID |
 | `PROVISIONER_PLMN_MAP` | （空: すべて `poc`） | PLMN マップ（本PoCの `VECTOR_GATEWAY_PLMN_MAP` と同じ値） |
 | `PROVISIONER_CLIENT_KEY` | （空: クライアント証明書のファイルから読む） | 下流用のクライアント証明書の秘密鍵を別のファイルにした場合の、コンテナ内のパス（`/certs/...`） |
 | `PROVISIONER_DOWNSTREAM_TIMEOUT` | `5s` | 下流の 1 回の呼び出しの上限時間。10 秒まで（超えると起動しない） |
 | `PROVISIONER_PUBLISH` | `127.0.0.1:9446` | provisioner の API を公開するホスト側のアドレスとポート |
-| `PROVISIONER_TLS_HOSTS` | `localhost,127.0.0.1,eapaka-provisioner` | 自己署名のサーバー証明書の SAN（生成済みの証明書には反映されない。3.4） |
+| `PROVISIONER_TLS_HOSTS` | `localhost,127.0.0.1,aka-provisioner` | 自己署名のサーバー証明書の SAN（生成済みの証明書には反映されない。3.4） |
 | `PROVISIONER_TLS_CERT` / `PROVISIONER_TLS_KEY` | （空: 自己署名） | 持ち込みのサーバー証明書と秘密鍵のコンテナ内のパス（`/certs/...`）。ファイルを置き換えると、次の接続から読み直す |
 | `PROVISIONER_LOG_LEVEL` | `info` | ログのレベル（debug / info / warn / error） |
 | `PROVISIONER_AUDIT_MAX` | `10000` | 監査ログの保持件数 |
@@ -823,4 +823,4 @@ aka-only-server の管理API: https://aka-only-server:9443/admin/v1
 
 コンテナの中では、このほかに `PROVISIONER_ADDR`（`:9446`）、`PROVISIONER_VALKEY_ADDR`（`valkey:6379`）、`PROVISIONER_CLIENT_CERT`（`/certs/client.pem`）、`PROVISIONER_PROV_SERVER_CERT`（`/certs/prov-server.pem`）、`PROVISIONER_AKA_SERVER_CERT`（`/certs/aka-server.pem`）を使う。compose を使わずに動かす場合は、これらも指定する（`PROVISIONER_TLS_CERT` / `_KEY` の既定は `/data/tls/cert.pem` / `key.pem`）。
 
-下流の証明書（`certs/client.pem`、`prov-server.pem`、`aka-server.pem`）は起動時に読むので、置き換えたら `docker compose restart eapaka-provisioner` で再起動する。
+下流の証明書（`certs/client.pem`、`prov-server.pem`、`aka-server.pem`）は起動時に読むので、置き換えたら `docker compose restart aka-provisioner` で再起動する。

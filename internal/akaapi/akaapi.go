@@ -1,5 +1,5 @@
-// Package akaapi は aka-only-server の管理API の呼び出し。
-// API 仕様は aka-only-server のリポジトリの docs/openapi/admin-api.yaml を参照。接続の仕組みは internal/downstream。
+// Package akaapi は aka-vecgen の管理API の呼び出し。
+// API 仕様は aka-vecgen のリポジトリの docs/openapi/admin-api.yaml を参照。接続の仕組みは internal/downstream。
 package akaapi
 
 import (
@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
 )
 
-// Client は aka-only-server の管理API のクライアント。
+// Client は aka-vecgen の管理API のクライアント。
 type Client struct {
 	*downstream.Client
 }
@@ -26,7 +26,7 @@ func New(opts downstream.Options) (*Client, error) {
 	return &Client{c}, nil
 }
 
-// Status は aka-only-server の状態。
+// Status は aka-vecgen の状態。
 type Status struct {
 	Version                     string    `json:"version"`
 	BootID                      string    `json:"bootId"`
@@ -37,12 +37,12 @@ type Status struct {
 	AVServerCertificateNotAfter time.Time `json:"avServerCertificateNotAfter"`
 }
 
-// Status は aka-only-server の状態を取得する。
+// Status は aka-vecgen の状態を取得する。
 func (c *Client) Status(ctx context.Context) (Status, error) {
 	return c.Call[Status](ctx, downstream.Request{Method: http.MethodGet, Path: []string{"status"}})
 }
 
-// ---- 加入者（鍵を aka-only-server に置く加入者）----
+// ---- 加入者（鍵を aka-vecgen に置く加入者）----
 
 // SQN 増加タイプ。
 const (
@@ -51,7 +51,7 @@ const (
 	SQNTypeInc33 = "inc33"
 )
 
-// ProblemDetails の cause の値（aka-only-server の管理API の OpenAPI と同じ）。
+// ProblemDetails の cause の値（aka-vecgen の管理API の OpenAPI と同じ）。
 const (
 	CauseUserNotFound     = "USER_NOT_FOUND"
 	CauseSubscriberExists = "SUBSCRIBER_ALREADY_EXISTS"
@@ -168,28 +168,28 @@ func (c *Client) GetAVClient(ctx context.Context, id int64) (AVClient, error) {
 	})
 }
 
-// hints は aka-only-server の管理API に接続できなかったときの対処の文。
+// hints は aka-vecgen の管理API に接続できなかったときの対処の文。
 var hints = downstream.Hints{
-	HostnameMismatch: "aka-only-server の管理API のサーバー証明書に、接続先のホスト名（または IP アドレス）が入っていません。" +
-		"aka-only-server 側の AKA_ADMIN_TLS_HOSTS に接続先（同一ホストなら aka-only-server）を加えて admin-cert reset で作り直し、" +
+	HostnameMismatch: "aka-vecgen の管理API のサーバー証明書に、接続先のホスト名（または IP アドレス）が入っていません。" +
+		"aka-vecgen 側の VECGEN_ADMIN_TLS_HOSTS に接続先（同一ホストなら aka-vecgen）を加えて admin-cert reset で作り直し、" +
 		"provisioner にも渡し直すか、証明書に入っている名前で接続してください。",
-	UnknownServer: "aka-only-server の管理API のサーバー証明書が、設定した証明書（PROVISIONER_AKA_SERVER_CERT）と一致しません。" +
-		"aka-only-server の admin-cert で取り出した証明書を設定してください。",
-	ServerCertInvalid: "aka-only-server の管理API のサーバー証明書が有効期間外です。aka-only-server 側で admin-cert reset で作り直し、" +
+	UnknownServer: "aka-vecgen の管理API のサーバー証明書が、設定した証明書（PROVISIONER_AKA_SERVER_CERT）と一致しません。" +
+		"aka-vecgen の admin-cert で取り出した証明書を設定してください。",
+	ServerCertInvalid: "aka-vecgen の管理API のサーバー証明書が有効期間外です。aka-vecgen 側で admin-cert reset で作り直し、" +
 		"provisioner にも渡し直してください。",
-	ClientRejected: "aka-only-server が provisioner のクライアント証明書を受け付けませんでした。" +
-		"aka-only-server 側の .env の AKA_ADMIN_CLIENTS に、このクライアント証明書のフィンガープリントが登録されているか" +
-		"（登録後に aka-only-server を起動し直したか）、証明書が有効期間内かを確認してください。",
-	ConnectionReset: "aka-only-server が接続を切りました。provisioner のクライアント証明書が受け付けられなかった可能性があります。" +
-		"aka-only-server 側の .env の AKA_ADMIN_CLIENTS に、このクライアント証明書のフィンガープリントが登録されているか" +
-		"（登録後に aka-only-server を起動し直したか）、証明書が有効期間内かを確認してください" +
-		"（aka-only-server のログに admin client certificate rejected が出ていれば、これが原因です）。",
-	NameNotFound: "aka-only-server のホスト名（%s）を解決できません。aka-only-server が起動しているか、" +
+	ClientRejected: "aka-vecgen が provisioner のクライアント証明書を受け付けませんでした。" +
+		"aka-vecgen 側の .env の VECGEN_ADMIN_CLIENTS に、このクライアント証明書のフィンガープリントが登録されているか" +
+		"（登録後に aka-vecgen を起動し直したか）、証明書が有効期間内かを確認してください。",
+	ConnectionReset: "aka-vecgen が接続を切りました。provisioner のクライアント証明書が受け付けられなかった可能性があります。" +
+		"aka-vecgen 側の .env の VECGEN_ADMIN_CLIENTS に、このクライアント証明書のフィンガープリントが登録されているか" +
+		"（登録後に aka-vecgen を起動し直したか）、証明書が有効期間内かを確認してください" +
+		"（aka-vecgen のログに admin client certificate rejected が出ていれば、これが原因です）。",
+	NameNotFound: "aka-vecgen のホスト名（%s）を解決できません。aka-vecgen が起動しているか、" +
 		"同一ホストの場合は provisioner が共有ネットワーク（aka-av）に参加しているか確認してください。",
-	DialFailed: "aka-only-server の管理API に接続できません。aka-only-server が起動しているか（管理API は AKA_ADMIN_CLIENTS を" +
+	DialFailed: "aka-vecgen の管理API に接続できません。aka-vecgen が起動しているか（管理API は VECGEN_ADMIN_CLIENTS を" +
 		"設定したときだけ有効）、接続先の URL とポートが正しいか確認してください。",
-	Timeout: "aka-only-server の管理API から時間内に応答がありません。接続先のアドレス、VPN、aka-only-server 側の公開先（AKA_ADMIN_PUBLISH）を確認してください。",
+	Timeout: "aka-vecgen の管理API から時間内に応答がありません。接続先のアドレス、VPN、aka-vecgen 側の公開先（VECGEN_ADMIN_PUBLISH）を確認してください。",
 }
 
-// Diagnose は、aka-only-server の管理API に接続できなかったときの原因の見当を返す。見当がつかなければ空文字列。
+// Diagnose は、aka-vecgen の管理API に接続できなかったときの原因の見当を返す。見当がつかなければ空文字列。
 func Diagnose(err error) string { return downstream.Diagnose(err, hints) }

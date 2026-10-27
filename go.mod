@@ -1,4 +1,4 @@
-module github.com/oyaguma3/eapaka-node-provisioner
+module github.com/oyaguma3/aka-provisioner
 
 go 1.27.3
 

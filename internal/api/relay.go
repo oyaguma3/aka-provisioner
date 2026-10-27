@@ -13,11 +13,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/akaapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/subscriber"
+	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/subscriber"
 )
 
 // 中継（設計概要 §7）。要求の本文は検証せずにそのまま下流に送り、下流の応答（エラーを含む）をそのまま返す。
@@ -304,7 +304,7 @@ func (h *Handler) relayProvAuditLogs(w http.ResponseWriter, r *http.Request) {
 // akaOrNotConfigured は aka のクライアントを返す。aka を扱わない設定なら 404 を書いて false。
 func (h *Handler) akaOrNotConfigured(w http.ResponseWriter) (AkaAPI, bool) {
 	if h.Aka == nil {
-		newProblem(http.StatusNotFound, causeDownstreamNotConfigured, "aka-only-server is not configured").write(w)
+		newProblem(http.StatusNotFound, causeDownstreamNotConfigured, "aka-vecgen is not configured").write(w)
 		return nil, false
 	}
 	return h.Aka, true

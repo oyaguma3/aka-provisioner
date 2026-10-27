@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/subscriber"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/subscriber"
 )
 
 // 操作の記録（/operations。設計概要 §9.3）。

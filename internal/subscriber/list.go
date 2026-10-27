@@ -5,10 +5,10 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/akaapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/plmn"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/plmn"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
 )
 
 // List は加入者の一覧の 1 ページ（設計概要 §6.4）。

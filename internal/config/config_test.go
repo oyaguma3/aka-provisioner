@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/plmn"
+	"github.com/oyaguma3/aka-provisioner/internal/plmn"
 )
 
 const fp = "7a7a91920ccfb51760f70d6dba4ceb8ba4386eec2728955983ad04c42e273043"
@@ -17,7 +17,7 @@ func TestDefaults(t *testing.T) {
 	}
 	if c.Addr != ":9446" || c.ProvURL != "https://provisioning-api:9444/admin/v1" || c.AkaEnabled() ||
 		c.DownstreamTimeout != 5*time.Second || c.AuditMaxLen != 10000 || c.ValkeyAddr != "valkey:6379" ||
-		strings.Join(c.TLSHosts, ",") != "localhost,127.0.0.1,eapaka-provisioner" || c.ClientCertFile != "/certs/client.pem" {
+		strings.Join(c.TLSHosts, ",") != "localhost,127.0.0.1,aka-provisioner" || c.ClientCertFile != "/certs/client.pem" {
 		t.Errorf("defaults = %+v", c)
 	}
 	// 管理クライアントがなければ起動しない。
@@ -28,7 +28,7 @@ func TestDefaults(t *testing.T) {
 
 func TestLoad(t *testing.T) {
 	t.Setenv("PROVISIONER_ADMIN_CLIENTS", "bff="+strings.ToUpper(fp[:2])+":"+fp[2:])
-	t.Setenv("PROVISIONER_AKA_URL", "https://aka-only-server:9443/admin/v1")
+	t.Setenv("PROVISIONER_AKA_URL", "https://aka-vecgen:9443/admin/v1")
 	t.Setenv("PROVISIONER_AKA_AV_CLIENT_ID", "3")
 	t.Setenv("PROVISIONER_PLMN_MAP", "00102:01")
 	t.Setenv("PROVISIONER_DOWNSTREAM_TIMEOUT", "3s")
@@ -53,10 +53,10 @@ func TestLoadErrors(t *testing.T) {
 		"duplicate fingerprint":  {"PROVISIONER_ADMIN_CLIENTS": "a=" + fp + ",b=" + fp},
 		"bad plmn map":           {"PROVISIONER_PLMN_MAP": "00102:02"},
 		"aka plmn without url":   {"PROVISIONER_PLMN_MAP": "00102:01"},
-		"aka url without client": {"PROVISIONER_AKA_URL": "https://aka-only-server:9443/admin/v1"},
+		"aka url without client": {"PROVISIONER_AKA_URL": "https://aka-vecgen:9443/admin/v1"},
 		"client without aka url": {"PROVISIONER_AKA_AV_CLIENT_ID": "1"},
 		"bad av client id": {
-			"PROVISIONER_AKA_URL": "https://aka-only-server:9443/admin/v1", "PROVISIONER_AKA_AV_CLIENT_ID": "0",
+			"PROVISIONER_AKA_URL": "https://aka-vecgen:9443/admin/v1", "PROVISIONER_AKA_AV_CLIENT_ID": "0",
 		},
 		"bad timeout":   {"PROVISIONER_DOWNSTREAM_TIMEOUT": "5"},
 		"long timeout":  {"PROVISIONER_DOWNSTREAM_TIMEOUT": "11s"},

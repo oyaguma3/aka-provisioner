@@ -29,7 +29,7 @@ func Open(ctx context.Context, o Options) (*Store, error) {
 		InitAddress: []string{o.Addr},
 		Password:    o.Password,
 		SelectDB:    o.DB,
-		ClientName:  "eapaka-provisioner",
+		ClientName:  "aka-provisioner",
 		// 単一ノード前提で、クライアント側キャッシュは使わない。
 		DisableCache: true,
 	})

@@ -14,7 +14,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/certs"
+	"github.com/oyaguma3/aka-provisioner/internal/certs"
 )
 
 const shutdownTimeout = 10 * time.Second

@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/config"
+	"github.com/oyaguma3/aka-provisioner/internal/config"
 )
 
 // healthcheckTimeout は、healthcheck で待ち受けに接続するときの上限。

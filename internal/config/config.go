@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/plmn"
+	"github.com/oyaguma3/aka-provisioner/internal/plmn"
 )
 
 // Config は provisioner の設定。
@@ -37,17 +37,17 @@ type Config struct {
 	ProvURL string
 	// ProvServerCertFile は provisioning-api のサーバー証明書（PEM）。これを信頼する証明書として検証する。
 	ProvServerCertFile string
-	// AkaURL は aka-only-server の管理API のベース URL。空なら aka-only-server を扱わない。
+	// AkaURL は aka-vecgen の管理API のベース URL。空なら aka-vecgen を扱わない。
 	AkaURL string
-	// AkaServerCertFile は aka-only-server の管理API のサーバー証明書（PEM）。
+	// AkaServerCertFile は aka-vecgen の管理API のサーバー証明書（PEM）。
 	AkaServerCertFile string
 	// DownstreamTimeout は下流の 1 回の呼び出しの上限時間。
 	DownstreamTimeout time.Duration
 
 	// PLMNMap は PLMN から鍵の置き場所への対応（本PoCの VECTOR_GATEWAY_PLMN_MAP と同じ値にする）。
 	PLMNMap plmn.Map
-	// AkaAVClientID は、本PoCの vector-gateway が aka-only-server に登録されている AVクライアントID。
-	// aka-only-server を扱わない場合は 0。
+	// AkaAVClientID は、本PoCの vector-gateway が aka-vecgen に登録されている AVクライアントID。
+	// aka-vecgen を扱わない場合は 0。
 	AkaAVClientID int64
 
 	// ValkeyAddr と ValkeyPassword は provisioner 専用の Valkey の接続先とパスワード。
@@ -60,11 +60,11 @@ type Config struct {
 	LogLevel slog.Level
 }
 
-// AkaEnabled は aka-only-server を扱うかを返す。
+// AkaEnabled は aka-vecgen を扱うかを返す。
 func (c Config) AkaEnabled() bool { return c.AkaURL != "" }
 
 var (
-	// adminClientNamePattern は管理クライアントの識別名（aka-only-server・provisioning-api と同じ規則）。
+	// adminClientNamePattern は管理クライアントの識別名（aka-vecgen・provisioning-api と同じ規則）。
 	adminClientNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 	fingerprintPattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
@@ -75,7 +75,7 @@ func Load() (Config, error) {
 		Addr:        cmp.Or(os.Getenv("PROVISIONER_ADDR"), ":9446"),
 		TLSCertFile: cmp.Or(os.Getenv("PROVISIONER_TLS_CERT"), "/data/tls/cert.pem"),
 		TLSKeyFile:  cmp.Or(os.Getenv("PROVISIONER_TLS_KEY"), "/data/tls/key.pem"),
-		TLSHosts:    splitList(cmp.Or(os.Getenv("PROVISIONER_TLS_HOSTS"), "localhost,127.0.0.1,eapaka-provisioner")),
+		TLSHosts:    splitList(cmp.Or(os.Getenv("PROVISIONER_TLS_HOSTS"), "localhost,127.0.0.1,aka-provisioner")),
 
 		ClientCertFile: cmp.Or(os.Getenv("PROVISIONER_CLIENT_CERT"), "/certs/client.pem"),
 		ClientKeyFile:  os.Getenv("PROVISIONER_CLIENT_KEY"),
@@ -121,7 +121,7 @@ func Load() (Config, error) {
 	case c.AkaEnabled() && os.Getenv("PROVISIONER_AKA_AV_CLIENT_ID") == "":
 		errs = append(errs, errors.New("PROVISIONER_AKA_AV_CLIENT_ID is required when PROVISIONER_AKA_URL is set"))
 	case !c.AkaEnabled() && c.PLMNMap.Uses(plmn.KeyStoreAKA):
-		errs = append(errs, errors.New("PROVISIONER_PLMN_MAP maps a PLMN to 01 (aka-only-server) but PROVISIONER_AKA_URL is not set"))
+		errs = append(errs, errors.New("PROVISIONER_PLMN_MAP maps a PLMN to 01 (aka-vecgen) but PROVISIONER_AKA_URL is not set"))
 	case !c.AkaEnabled() && c.AkaAVClientID != 0:
 		errs = append(errs, errors.New("PROVISIONER_AKA_AV_CLIENT_ID is set but PROVISIONER_AKA_URL is not set"))
 	}
@@ -144,7 +144,7 @@ func (c Config) CheckServe() error {
 	return nil
 }
 
-// ParseAdminClients は「識別名=フィンガープリント」のカンマ区切りを解釈する（aka-only-server の AKA_ADMIN_CLIENTS と同じ形式）。
+// ParseAdminClients は「識別名=フィンガープリント」のカンマ区切りを解釈する（aka-vecgen の VECGEN_ADMIN_CLIENTS と同じ形式）。
 // フィンガープリントは SHA-256 の 16進表記で、大文字やコロン区切り（openssl の出力形式）も受け付ける。
 func ParseAdminClients(v string) (map[string]string, error) {
 	clients := map[string]string{}

@@ -1,10 +1,10 @@
-# 本PoC（eapaka-radius-server-poc）と同じホストで動かすときに重ねる設定。
+# 本PoC（aka-radius）と同じホストで動かすときに重ねる設定。
 # 本PoCの compose が作る共有ネットワーク（既定の名前は eapaka-prov）に provisioner だけを参加させ、
 # ホスト名 provisioning-api で Provisioning API に接続する。provisioner 専用の Valkey は参加させない。
 # 共有ネットワークは本PoCを docker compose --profile provisioning up -d したときだけ作られるので、本PoCを先に起動する。
 # .env の COMPOSE_FILE に加えると有効になる。
 services:
-  eapaka-provisioner:
+  aka-provisioner:
     networks:
       - eapaka-prov
 

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/certs"
+	"github.com/oyaguma3/aka-provisioner/internal/certs"
 )
 
 // lockedBuffer は、サーバーのゴルーチンが書くログを、テストから安全に読むためのバッファ。
@@ -49,7 +49,7 @@ func clientCert(t *testing.T, name string, validFor time.Duration) tls.Certifica
 }
 
 func TestServeMTLS(t *testing.T) {
-	serverPEM, serverKey, err := certs.SelfSigned("eapaka-provisioner", []string{"127.0.0.1"}, time.Hour)
+	serverPEM, serverKey, err := certs.SelfSigned("aka-provisioner", []string{"127.0.0.1"}, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

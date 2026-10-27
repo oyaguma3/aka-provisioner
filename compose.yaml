@@ -1,5 +1,5 @@
 services:
-  eapaka-provisioner:
+  aka-provisioner:
     build:
       context: .
       args:
@@ -13,7 +13,7 @@ services:
         condition: service_healthy
     # API の待ち受けに接続できるかを確かめる（distroless のため curl はない。mTLS なので TCP の接続まで）。
     healthcheck:
-      test: ["CMD", "/eapaka-provisioner", "healthcheck"]
+      test: ["CMD", "/aka-provisioner", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -22,7 +22,7 @@ services:
       PROVISIONER_ADDR: ":9446"
       PROVISIONER_TLS_CERT: ${PROVISIONER_TLS_CERT:-/data/tls/cert.pem}
       PROVISIONER_TLS_KEY: ${PROVISIONER_TLS_KEY:-/data/tls/key.pem}
-      PROVISIONER_TLS_HOSTS: ${PROVISIONER_TLS_HOSTS:-localhost,127.0.0.1,eapaka-provisioner}
+      PROVISIONER_TLS_HOSTS: ${PROVISIONER_TLS_HOSTS:-localhost,127.0.0.1,aka-provisioner}
       PROVISIONER_ADMIN_CLIENTS: ${PROVISIONER_ADMIN_CLIENTS:-}
       PROVISIONER_CLIENT_CERT: /certs/client.pem
       PROVISIONER_CLIENT_KEY: ${PROVISIONER_CLIENT_KEY:-}
@@ -41,7 +41,7 @@ services:
       # 自動生成したサーバー証明書を保存する。
       - provisioner-data:/data
       # 下流用の証明書（client.pem: gen-client-cert で作った provisioner のクライアント証明書と秘密鍵、
-      # prov-server.pem: 本PoCの provisioning-api のサーバー証明書、aka-server.pem: aka-only-server の管理API のサーバー証明書）と、
+      # prov-server.pem: 本PoCの provisioning-api のサーバー証明書、aka-server.pem: aka-vecgen の管理API のサーバー証明書）と、
       # 持ち込みのサーバー証明書を置く。コンテナは UID 65532 で動くので、ファイルはこの UID で読めるようにする。
       - ./certs:/certs:ro
     ports:
@@ -49,7 +49,7 @@ services:
       - "${PROVISIONER_PUBLISH:-127.0.0.1:9446}:9446"
     networks:
       - default
-      # 同一ホストの管理クライアント（BFF など）は、この共有ネットワークに参加して https://eapaka-provisioner:9446 で接続する。
+      # 同一ホストの管理クライアント（BFF など）は、この共有ネットワークに参加して https://aka-provisioner:9446 で接続する。
       - shared
 
   valkey:
@@ -74,7 +74,7 @@ services:
 networks:
   default:
   shared:
-    name: ${PROVISIONER_SHARED_NETWORK:-eapaka-provisioner}
+    name: ${PROVISIONER_SHARED_NETWORK:-aka-provisioner}
 
 volumes:
   provisioner-data:

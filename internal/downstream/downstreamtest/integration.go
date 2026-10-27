@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
 )
 
 // 契約テスト（実際の下流を相手にしたテスト）の接続先は、次の環境変数で指定する。指定しなければテストはスキップする。
@@ -17,8 +17,8 @@ import (
 //	PROVISIONER_TEST_CLIENT_KEY        秘密鍵の PEM（証明書のファイルに含めた場合は不要）
 //	PROVISIONER_TEST_PROV_URL          provisioning-api のベース URL（例: https://127.0.0.1:19444/admin/v1）
 //	PROVISIONER_TEST_PROV_SERVER_CERT  provisioning-api のサーバー証明書の PEM
-//	PROVISIONER_TEST_AKA_URL           aka-only-server の管理API のベース URL（例: https://127.0.0.1:19443/admin/v1）
-//	PROVISIONER_TEST_AKA_SERVER_CERT   aka-only-server の管理API のサーバー証明書の PEM
+//	PROVISIONER_TEST_AKA_URL           aka-vecgen の管理API のベース URL（例: https://127.0.0.1:19443/admin/v1）
+//	PROVISIONER_TEST_AKA_SERVER_CERT   aka-vecgen の管理API のサーバー証明書の PEM
 
 // IntegrationOperator は契約テストで下流に渡す操作者。
 const IntegrationOperator = "it-provisioner"

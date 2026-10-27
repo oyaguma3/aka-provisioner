@@ -9,9 +9,9 @@ import (
 	"slices"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/trace"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
 // やり直しのワーカーと、操作の記録への操作（設計概要 §9.3）。

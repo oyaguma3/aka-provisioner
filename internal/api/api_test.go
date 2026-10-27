@@ -18,13 +18,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/akaapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/audit"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/plmn"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/trace"
+	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
+	"github.com/oyaguma3/aka-provisioner/internal/audit"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/plmn"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
 // ---- 偽物 ----
@@ -242,7 +242,7 @@ func newEnv(t *testing.T, withAka bool) *env {
 			status:         provapi.Status{Version: "0.3.0", NodeName: "poc-01", SubscriberCount: 3},
 		},
 		aka: &fakeAka{
-			fakeDownstream: fakeDownstream{baseURL: "https://aka-only-server:9443/admin/v1"},
+			fakeDownstream: fakeDownstream{baseURL: "https://aka-vecgen:9443/admin/v1"},
 			status:         akaapi.Status{Version: "1.0.0", SubscriberCount: 7},
 			av:             akaapi.AVClient{ID: 2, Name: "vector-gateway", Enabled: true},
 		},
@@ -315,7 +315,7 @@ func TestStatus(t *testing.T) {
 		"downstreams": map[string]any{
 			"prov": map[string]any{"configured": true, "url": "https://provisioning-api:9444/admin/v1", "reachable": true,
 				"version": "0.3.0", "nodeName": "poc-01", "subscriberCount": 3.0},
-			"aka": map[string]any{"configured": true, "url": "https://aka-only-server:9443/admin/v1", "reachable": true,
+			"aka": map[string]any{"configured": true, "url": "https://aka-vecgen:9443/admin/v1", "reachable": true,
 				"version": "1.0.0", "subscriberCount": 7.0},
 		},
 		"avClient":   map[string]any{"id": 2.0, "exists": true, "enabled": true, "name": "vector-gateway"},
@@ -344,7 +344,7 @@ func TestStatusFailures(t *testing.T) {
 		t.Errorf("valkey = %+v, operations = %+v", got.Valkey, got.Operations)
 	}
 
-	// aka-only-server に接続できなければ、AVクライアントは分からない（exists を省略）。
+	// aka-vecgen に接続できなければ、AVクライアントは分からない（exists を省略）。
 	e = newEnv(t, true)
 	e.aka.statusErr = errors.New("timeout")
 	got = decode[statusJSON](t, e.do("GET", "/admin/v1/status", nil), http.StatusOK)
@@ -352,7 +352,7 @@ func TestStatusFailures(t *testing.T) {
 		t.Errorf("aka = %+v, av = %+v", a, got.AVClient)
 	}
 
-	// aka-only-server を扱わない設定。
+	// aka-vecgen を扱わない設定。
 	e = newEnv(t, false)
 	raw := decode[map[string]any](t, e.do("GET", "/admin/v1/status", nil), http.StatusOK)
 	if !jsonEqual(raw["downstreams"].(map[string]any)["aka"], map[string]any{"configured": false, "reachable": false}) ||

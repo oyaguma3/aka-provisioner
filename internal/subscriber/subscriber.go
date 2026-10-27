@@ -1,5 +1,5 @@
 // Package subscriber は加入者の統合操作（設計概要 §6）。加入者を「IMSI＋鍵の置き場所＋認可ポリシー」として扱い、
-// 本PoCの Provisioning API（prov）と aka-only-server の管理API（aka）を組み合わせて操作する。
+// 本PoCの Provisioning API（prov）と aka-vecgen の管理API（aka）を組み合わせて操作する。
 // 複数の下流にまたがる作成・変更・削除は、操作の記録（store.Operation）を残しながら行い、途中で失敗したら
 // 補償（作成・変更）またはやり直し（削除）で整える（設計概要 §9.3）。
 //
@@ -16,11 +16,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/akaapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/plmn"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/plmn"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
 )
 
 // Prov は使う provisioning-api の操作。*provapi.Client が満たす。
@@ -37,7 +37,7 @@ type Prov interface {
 	ListPolicies(ctx context.Context, p downstream.ListParams) (provapi.PolicyList, error)
 }
 
-// Aka は使う aka-only-server の管理API の操作。*akaapi.Client が満たす。
+// Aka は使う aka-vecgen の管理API の操作。*akaapi.Client が満たす。
 type Aka interface {
 	GetSubscriber(ctx context.Context, imsi string) (akaapi.Subscriber, error)
 	CreateSubscriber(ctx context.Context, s akaapi.SubscriberCreate) (akaapi.Subscriber, error)
@@ -66,7 +66,7 @@ type Auditor interface {
 // Service は加入者の統合操作。
 type Service struct {
 	Prov Prov
-	// Aka は aka-only-server を扱わない設定なら nil（そのとき PLMN マップは aka を含まない）。
+	// Aka は aka-vecgen を扱わない設定なら nil（そのとき PLMN マップは aka を含まない）。
 	Aka Aka
 	// AVClientID は、本PoCの vector-gateway の AVクライアントID。
 	AVClientID int64
@@ -253,7 +253,7 @@ func (s *Service) load(ctx context.Context, imsi string) (state, error) {
 		if st.keyStore == plmn.KeyStoreAKA {
 			return state{}, &DownstreamError{Name: downstream.Aka, Err: akaErr}
 		}
-		s.Log.WarnContext(ctx, "could not check aka-only-server for the subscriber", "imsi", imsi, "error", akaErr)
+		s.Log.WarnContext(ctx, "could not check aka-vecgen for the subscriber", "imsi", imsi, "error", akaErr)
 		st.otherUnreachable = true
 	}
 	return st, nil

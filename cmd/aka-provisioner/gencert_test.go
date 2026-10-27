@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/certs"
+	"github.com/oyaguma3/aka-provisioner/internal/certs"
 )
 
 func TestGenClientCertStdout(t *testing.T) {
@@ -26,7 +26,7 @@ func TestGenClientCertStdout(t *testing.T) {
 	}
 	// 下流 2 つの .env に貼れる行を出す。
 	fp := certs.Fingerprint(cert.Leaf)
-	for _, want := range []string{"PROVISIONING_API_ADMIN_CLIENTS=provisioner=" + fp + "\n", "AKA_ADMIN_CLIENTS=provisioner=" + fp + "\n"} {
+	for _, want := range []string{"PROVISIONING_API_ADMIN_CLIENTS=provisioner=" + fp + "\n", "VECGEN_ADMIN_CLIENTS=provisioner=" + fp + "\n"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr = %q, want %q", stderr.String(), want)
 		}

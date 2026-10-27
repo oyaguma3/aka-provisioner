@@ -8,11 +8,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
 )
 
 // 入力の検証（設計概要 §6.2）。下流と同じ規則で先に検証し、下流への書き込みを始めてから入力の誤りで断られて
-// 補償する、という流れを通常は起こさないようにする。規則は本PoCの pkg/validation と aka-only-server の管理API に揃える。
+// 補償する、という流れを通常は起こさないようにする。規則は本PoCの pkg/validation と aka-vecgen の管理API に揃える。
 
 var (
 	hex32Pattern = regexp.MustCompile(`^[0-9A-Fa-f]{32}$`)

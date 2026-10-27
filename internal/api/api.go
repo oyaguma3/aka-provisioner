@@ -12,13 +12,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/akaapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/audit"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/plmn"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/trace"
+	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
+	"github.com/oyaguma3/aka-provisioner/internal/audit"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/plmn"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
 // basePath は API のパスの接頭辞。
@@ -36,7 +36,7 @@ type ProvAPI interface {
 	Status(ctx context.Context) (provapi.Status, error)
 }
 
-// AkaAPI は provisioner が使う aka-only-server の管理API の操作。*akaapi.Client が満たす。
+// AkaAPI は provisioner が使う aka-vecgen の管理API の操作。*akaapi.Client が満たす。
 type AkaAPI interface {
 	Relayer
 	Status(ctx context.Context) (akaapi.Status, error)
@@ -64,7 +64,7 @@ type Handler struct {
 	MgmtClient func(*http.Request) string
 
 	Prov ProvAPI
-	// Aka は aka-only-server を扱わない設定（PROVISIONER_AKA_URL が空）なら nil。
+	// Aka は aka-vecgen を扱わない設定（PROVISIONER_AKA_URL が空）なら nil。
 	Aka AkaAPI
 	// AkaAVClientID は、本PoCの vector-gateway の AVクライアントID（Aka が nil なら 0）。
 	AkaAVClientID int64

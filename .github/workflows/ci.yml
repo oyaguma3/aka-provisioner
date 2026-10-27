@@ -1,4 +1,4 @@
-# テスト、イメージのビルドと compose の設定の確認、下流（本PoCの Provisioning API と aka-only-server の管理API）との契約テストを行う。
+# テスト、イメージのビルドと compose の設定の確認、下流（本PoCの Provisioning API と aka-vecgen の管理API）との契約テストを行う。
 name: CI
 
 on:
@@ -67,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: イメージのビルド
-        run: docker build --build-arg VERSION="${GITHUB_SHA::7}" -t eapaka-provisioner:ci .
+        run: docker build --build-arg VERSION="${GITHUB_SHA::7}" -t aka-provisioner:ci .
       - name: compose の設定（下流が同一ホストと別ホスト）
         run: |
           cp .env.example .env
@@ -85,8 +85,8 @@ jobs:
     env:
       # 契約テストの相手にする下流のコミット。下流の API を変えたら、その main に入った後のコミットに更新する。
       # PoC セット（eapaka-pocset）のタグを付けるときは、その組み合わせの表のコミットと一致させる。
-      POC_REF: 1f8aad11c9dcaee783689fd9c78e4f419fee672f
-      AKA_REF: c2a093d0c336be039cd00f74631be5f1de4d4300
+      RADIUS_REF: dd107b36aa6d5d8f43af71d26d5bf96b0306044b
+      VECGEN_REF: 481a7cc69cda775e9ad63635a10ec9b41d8f8970
     services:
       # 下流がそれぞれ使う Valkey（このジョブ専用で、テストデータは最後に消える）。
       prov-valkey:
@@ -111,32 +111,32 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
         with:
-          repository: oyaguma3/eapaka-radius-server-poc
-          ref: ${{ env.POC_REF }}
-          path: eapaka-radius-server-poc
+          repository: oyaguma3/aka-radius
+          ref: ${{ env.RADIUS_REF }}
+          path: aka-radius
       - uses: actions/checkout@v7
         with:
-          repository: oyaguma3/aka-only-server
-          ref: ${{ env.AKA_REF }}
-          path: aka-only-server
+          repository: oyaguma3/aka-vecgen
+          ref: ${{ env.VECGEN_REF }}
+          path: aka-vecgen
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - name: 下流と eapaka-provisioner のビルド
+      - name: 下流と aka-provisioner のビルド
         run: |
-          git -C eapaka-radius-server-poc log -1 --format='本PoC: %h %s'
-          git -C aka-only-server log -1 --format='aka-only-server: %h %s'
-          (cd eapaka-radius-server-poc/apps/provisioning-api && go build -o "$RUNNER_TEMP/provisioning-api" .)
-          (cd aka-only-server && go build -o "$RUNNER_TEMP/aka-only-server" ./cmd/aka-only-server)
-          go build -o "$RUNNER_TEMP/eapaka-provisioner" ./cmd/eapaka-provisioner
+          git -C aka-radius log -1 --format='本PoC: %h %s'
+          git -C aka-vecgen log -1 --format='aka-vecgen: %h %s'
+          (cd aka-radius/apps/provisioning-api && go build -o "$RUNNER_TEMP/provisioning-api" .)
+          (cd aka-vecgen && go build -o "$RUNNER_TEMP/aka-vecgen" ./cmd/aka-vecgen)
+          go build -o "$RUNNER_TEMP/aka-provisioner" ./cmd/aka-provisioner
       - name: 証明書の作成と下流の起動
         working-directory: ${{ runner.temp }}
         run: |
           # provisioner のクライアント証明書を作り、表示された値で下流 2 つに登録する。
-          ./eapaka-provisioner gen-client-cert -name provisioner-ci > client.pem 2> gen.txt
+          ./aka-provisioner gen-client-cert -name provisioner-ci > client.pem 2> gen.txt
           cat gen.txt
           prov_clients=$(sed -n 's/^PROVISIONING_API_ADMIN_CLIENTS=//p' gen.txt)
-          aka_clients=$(sed -n 's/^AKA_ADMIN_CLIENTS=//p' gen.txt)
+          aka_clients=$(sed -n 's/^VECGEN_ADMIN_CLIENTS=//p' gen.txt)
 
           # provisioning-api のサーバー証明書は本PoCの B-02 §15.2 と同じ手順で作る。
           openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
@@ -148,16 +148,16 @@ jobs:
           REDIS_HOST=127.0.0.1 REDIS_PORT=16379 LOG_LEVEL=INFO \
             nohup ./provisioning-api > provisioning-api.log 2>&1 &
 
-          # aka-only-server。vector-gateway の代わりの AVクライアント（ID 1）を登録しておく。
-          export AKA_VALKEY_ADDR=127.0.0.1:16380
-          ./aka-only-server client gen-cert -name vector-gateway > vector-gateway.pem
-          ./aka-only-server client add -name vector-gateway -cert vector-gateway.pem
-          AKA_ADMIN_ADDR=127.0.0.1:19443 AKA_AV_TLS_ADDR=127.0.0.1:18443 \
-          AKA_ADMIN_TLS_HOSTS=localhost,127.0.0.1 AKA_AV_TLS_HOSTS=localhost,127.0.0.1 \
-          AKA_ADMIN_CLIENTS="$aka_clients" \
-            nohup ./aka-only-server > aka-only-server.log 2>&1 &
+          # aka-vecgen。vector-gateway の代わりの AVクライアント（ID 1）を登録しておく。
+          export VECGEN_VALKEY_ADDR=127.0.0.1:16380
+          ./aka-vecgen client gen-cert -name vector-gateway > vector-gateway.pem
+          ./aka-vecgen client add -name vector-gateway -cert vector-gateway.pem
+          VECGEN_ADMIN_ADDR=127.0.0.1:19443 VECGEN_AV_TLS_ADDR=127.0.0.1:18443 \
+          VECGEN_ADMIN_TLS_HOSTS=localhost,127.0.0.1 VECGEN_AV_TLS_HOSTS=localhost,127.0.0.1 \
+          VECGEN_ADMIN_CLIENTS="$aka_clients" \
+            nohup ./aka-vecgen > aka-vecgen.log 2>&1 &
           for i in $(seq 1 30); do
-            ./aka-only-server admin-cert > aka-server.pem 2>/dev/null && grep -q 'BEGIN CERTIFICATE' aka-server.pem && exit 0
+            ./aka-vecgen admin-cert > aka-server.pem 2>/dev/null && grep -q 'BEGIN CERTIFICATE' aka-server.pem && exit 0
             sleep 1
           done
           exit 1
@@ -171,7 +171,7 @@ jobs:
           PROVISIONER_AKA_AV_CLIENT_ID: "1"
         run: |
           for i in $(seq 1 30); do
-            "$RUNNER_TEMP/eapaka-provisioner" check-downstream && exit 0
+            "$RUNNER_TEMP/aka-provisioner" check-downstream && exit 0
             sleep 1
           done
           exit 1
@@ -194,4 +194,4 @@ jobs:
         if: failure()
         run: |
           echo "---- provisioning-api ----"; cat "$RUNNER_TEMP/provisioning-api.log"
-          echo "---- aka-only-server ----"; cat "$RUNNER_TEMP/aka-only-server.log"
+          echo "---- aka-vecgen ----"; cat "$RUNNER_TEMP/aka-vecgen.log"

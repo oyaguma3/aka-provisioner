@@ -1,4 +1,4 @@
-// Package downstream は、下流の API（本PoCの provisioning-api と、aka-only-server の管理API）を呼ぶ共通のクライアント。
+// Package downstream は、下流の API（本PoCの provisioning-api と、aka-vecgen の管理API）を呼ぶ共通のクライアント。
 // 下流の 2 つは作法を揃えてある（パス /admin/v1、JSON、ProblemDetails、mTLS とフィンガープリントの固定、
 // X-Operator-Id、X-Trace-ID）ので、接続と呼び出しの仕組みはここにまとめ、型つきの呼び出しは
 // internal/provapi と internal/akaapi に置く。
@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/trace"
+	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
 const (
@@ -46,7 +46,7 @@ type Name string
 const (
 	// Prov は本PoCの Provisioning API（provisioning-api）。
 	Prov Name = "prov"
-	// Aka は aka-only-server の管理API。
+	// Aka は aka-vecgen の管理API。
 	Aka Name = "aka"
 )
 

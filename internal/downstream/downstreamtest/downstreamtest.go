@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/certs"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/certs"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
 )
 
 // Discard はテストで使う、何も出力しないロガー。

@@ -16,7 +16,7 @@ type KeyStore string
 const (
 	// KeyStorePoC は本PoCの Vector API（接続方式 00。provisioning-api の加入者）。
 	KeyStorePoC KeyStore = "poc"
-	// KeyStoreAKA は aka-only-server（接続方式 01。aka-only-server の管理API の加入者）。
+	// KeyStoreAKA は aka-vecgen（接続方式 01。aka-vecgen の管理API の加入者）。
 	KeyStoreAKA KeyStore = "aka"
 )
 

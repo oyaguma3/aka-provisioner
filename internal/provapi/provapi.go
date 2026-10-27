@@ -1,4 +1,4 @@
-// Package provapi は本PoC（eapaka-radius-server-poc）の Provisioning API（provisioning-api）の呼び出し。
+// Package provapi は本PoC（aka-radius）の Provisioning API（provisioning-api）の呼び出し。
 // API 仕様は本PoCのリポジトリの docs/openapi/provisioning-api.yaml を参照。接続の仕組みは internal/downstream。
 package provapi
 
@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
 )
 
 // Client は Provisioning API のクライアント。

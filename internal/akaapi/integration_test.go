@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/certs"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream/downstreamtest"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/trace"
+	"github.com/oyaguma3/aka-provisioner/internal/certs"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream/downstreamtest"
+	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
-// 実際の aka-only-server の管理API を相手にした契約テスト。接続先は downstreamtest.IntegrationOptions を参照。
+// 実際の aka-vecgen の管理API を相手にした契約テスト。接続先は downstreamtest.IntegrationOptions を参照。
 // テスト用の加入者（IMSI 00101 で始まるテスト用の番号）と AVクライアントを作り、終わったら削除する。
 
 func newIntegrationClient(t *testing.T) *Client {

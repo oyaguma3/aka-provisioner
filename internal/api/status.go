@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/akaapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/downstream"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/plmn"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/provapi"
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
+	"github.com/oyaguma3/aka-provisioner/internal/downstream"
+	"github.com/oyaguma3/aka-provisioner/internal/plmn"
+	"github.com/oyaguma3/aka-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
 )
 
 type statusJSON struct {
@@ -47,7 +47,7 @@ type downstreamStatusJSON struct {
 
 type avClientStatusJSON struct {
 	ID int64 `json:"id"`
-	// Exists と Enabled は、aka-only-server に問い合わせられなかった場合は省略する。
+	// Exists と Enabled は、aka-vecgen に問い合わせられなかった場合は省略する。
 	Exists  *bool  `json:"exists,omitempty"`
 	Enabled *bool  `json:"enabled,omitempty"`
 	Name    string `json:"name,omitempty"`
@@ -115,7 +115,7 @@ func (h *Handler) akaStatus(ctx context.Context) (downstreamStatusJSON, avClient
 	s, err := h.Aka.Status(ctx)
 	if err != nil {
 		st.Error, st.Hint = err.Error(), akaapi.Diagnose(err)
-		h.Log.WarnContext(ctx, "aka-only-server is not available", "error", err, "hint", st.Hint)
+		h.Log.WarnContext(ctx, "aka-vecgen is not available", "error", err, "hint", st.Hint)
 		return st, av
 	}
 	st.Reachable, st.Version, st.SubscriberCount = true, s.Version, &s.SubscriberCount

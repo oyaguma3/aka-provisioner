@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/oyaguma3/eapaka-node-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/store"
 )
 
 const (

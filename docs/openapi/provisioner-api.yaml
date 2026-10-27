@@ -1,10 +1,10 @@
 openapi: 3.0.3
 info:
-  title: eapaka-node-provisioner API
+  title: aka-provisioner API
   version: 0.3.0
   description: |
-    EAP-AKA RADIUS PoC（以下「本PoC」）の Provisioning API（以下「prov」）と、aka-only-server の管理API（以下「aka」）を
-    組み合わせて操作する統合API。設計は `docs/design-overview.md` を参照。
+    EAP-AKA RADIUS PoC（以下「本PoC」）の Provisioning API（以下「prov」）と、aka-vecgen の管理API（以下「aka」）を
+    組み合わせて操作する統合API。設計は `docs/poc/design-overview.md`（今の作り）を参照。
     作法は下流の 2 つの API（prov 0.4.0、aka 0.2.0）に揃えている。
 
     0.3.0 の変更:
@@ -15,7 +15,7 @@ info:
     加入者:
     - 加入者を「IMSI＋鍵の置き場所（`keyStore`）＋認可ポリシー」として扱う（`/subscribers`）。
       - `poc`（接続方式 `00`）: 鍵を本PoCの `sub:{IMSI}` に持つ（prov の `/subscribers`）。
-      - `aka`（接続方式 `01`）: 鍵を aka-only-server が持つ（aka の `/subscribers`）。本PoCの vector-gateway の
+      - `aka`（接続方式 `01`）: 鍵を aka-vecgen が持つ（aka の `/subscribers`）。本PoCの vector-gateway の
         AVクライアントID（設定 `PROVISIONER_AKA_AV_CLIENT_ID`）を、加入者の許可クライアントに含める。
       - 認可ポリシーは、置き場所によらず本PoCに持つ（prov の `/policies`）。
     - 置き場所は、IMSI の PLMN と設定 `PROVISIONER_PLMN_MAP`（本PoCの `VECTOR_GATEWAY_PLMN_MAP` と同じ形式・同じ値）で決まる。
@@ -124,7 +124,7 @@ paths:
       description: |
         prov の加入者、aka の加入者、prov の認可ポリシーの 3 つの一覧を、同じ `cursor` と `prefix` で取り寄せ、
         IMSI の昇順にマージして返す。Ki と OPc は含まない。
-        - aka の加入者は、PLMN マップで `aka` に当たる IMSI だけを対象にする（aka-only-server には本PoCと関係のない加入者もいるため）。
+        - aka の加入者は、PLMN マップで `aka` に当たる IMSI だけを対象にする（aka-vecgen には本PoCと関係のない加入者もいるため）。
         - 鍵だけ、ポリシーだけの IMSI も含める（`issues` で示す）。
         - 一覧では、`poc` の IMSI について aka 側の加入者は調べない（`KEY_IN_OTHER_STORE` は個別の取得でだけ分かる場合がある）。
         - 和集合の正確な件数は求めないため、`total` は返さない。
@@ -183,7 +183,7 @@ paths:
                       - nasId: '*'
                         allowedSsids: [CORP-WIFI]
               aka:
-                summary: 鍵を aka-only-server に置く加入者（PLMN マップで 00102 を 01 にした場合）
+                summary: 鍵を aka-vecgen に置く加入者（PLMN マップで 00102 を 01 にした場合）
                 value:
                   imsi: '001020000000001'
                   keyStore: aka
@@ -1140,7 +1140,7 @@ components:
 
     Sqn:
       type: string
-      description: SQN（48bit、16進12桁）。`poc` は Vector API が、`aka` は aka-only-server が認証のたびに進める。
+      description: SQN（48bit、16進12桁）。`poc` は Vector API が、`aka` は aka-vecgen が認証のたびに進める。
       pattern: '^[A-Fa-f0-9]{12}$'
       example: '000000000020'
 
@@ -1152,7 +1152,7 @@ components:
     SqnType:
       type: string
       description: |
-        SQN 増加タイプ（`aka` の加入者だけ。aka-only-server の管理API と同じ）。
+        SQN 増加タイプ（`aka` の加入者だけ。aka-vecgen の管理API と同じ）。
         - `inc1`: SQN 全体を 1 加算する
         - `inc32`: SEQ を 1 加算し、IND は維持する
         - `inc33`: SEQ と IND を 1 ずつ加算する
@@ -1166,7 +1166,7 @@ components:
       description: |
         鍵（Ki / OPc）の置き場所。
         - `poc`: 本PoCの Vector API（接続方式 `00`。prov の加入者）
-        - `aka`: aka-only-server（接続方式 `01`。aka の加入者）
+        - `aka`: aka-vecgen（接続方式 `01`。aka の加入者）
       enum:
         - poc
         - aka
@@ -1176,7 +1176,7 @@ components:
       description: |
         下流の API。
         - `prov`: 本PoCの Provisioning API
-        - `aka`: aka-only-server の管理API
+        - `aka`: aka-vecgen の管理API
       enum:
         - prov
         - aka
@@ -1324,7 +1324,7 @@ components:
         sqnType:
           allOf:
             - $ref: '#/components/schemas/SqnType'
-          description: '`aka` のときだけ指定できる。省略時は aka-only-server の既定（`inc32`）。'
+          description: '`aka` のときだけ指定できる。省略時は aka-vecgen の既定（`inc32`）。'
         allowPlain:
           type: boolean
           description: '`aka` のときだけ指定できる。省略時は `false`。'
@@ -2009,11 +2009,11 @@ components:
         nextBefore:
           type: string
 
-    # ---- 以下は aka（aka-only-server 管理API 0.2.0）と同じ形 ----
+    # ---- 以下は aka（aka-vecgen 管理API 0.2.0）と同じ形 ----
 
     AkaAuditLogEntry:
       type: object
-      description: aka の監査ログの 1 件（aka-only-server 管理API の `AuditLogEntry`）。
+      description: aka の監査ログの 1 件（aka-vecgen 管理API の `AuditLogEntry`）。
       required:
         - id
         - time
@@ -2057,7 +2057,7 @@ components:
 
     AkaAvClient:
       type: object
-      description: aka の AVクライアント（aka-only-server 管理API の `Client`）。
+      description: aka の AVクライアント（aka-vecgen 管理API の `Client`）。
       required:
         - id
         - name
