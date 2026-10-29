@@ -1,6 +1,7 @@
 # aka-vecgen と同じホストで動かすときに重ねる設定。
 # aka-vecgen の compose が作る共有ネットワーク（既定の名前は aka-av）に provisioner だけを参加させ、
-# ホスト名 aka-vecgen で管理API に接続する。provisioner 専用の Valkey は参加させない。
+# ホスト名 aka-vecgen で管理API に接続する（登録簿の url は https://aka-vecgen:9443/admin/v2）。provisioner 専用の Valkey は参加させない。
+# 本番では aka-vecgen は別のノードにあり、サービス用の WireGuard のアドレスで接続する（重ねない）。
 # aka-vecgen を先に起動する。.env の COMPOSE_FILE に加えると有効になる。
 services:
   aka-provisioner:

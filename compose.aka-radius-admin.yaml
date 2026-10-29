@@ -1,0 +1,14 @@
+# aka-radius と同じホストで試すときに重ねる設定。
+# aka-radius の compose が作る共有ネットワーク（既定の名前は aka-radius-admin）に provisioner だけを参加させ、
+# ホスト名 aka-radius-admin で管理API に接続する（登録簿の url は https://aka-radius-admin:9444/admin/v2）。
+# 本番では aka-radius は別のノードにあり、サービス用の WireGuard のアドレスで接続する（重ねない）。
+# aka-radius を先に起動する。.env の COMPOSE_FILE に加えると有効になる。
+services:
+  aka-provisioner:
+    networks:
+      - aka-radius-admin
+
+networks:
+  aka-radius-admin:
+    external: true
+    name: ${RADIUS_ADMIN_SHARED_NETWORK:-aka-radius-admin}

@@ -1,0 +1,6 @@
+{
+  "clientCert": "client.pem",
+  "clientKey": "client.pem",
+  "vecgen": { "url": "https://10.20.0.2:9443/admin/v2", "serverCert": "vecgen-admin.pem" },
+  "radius": { "url": "https://10.20.0.2:9444/admin/v2", "serverCert": "radius-admin.pem" }
+}

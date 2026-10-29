@@ -1,0 +1,57 @@
+# 管理面の Fluent Bit（設計概要 §10。aka-radius の configs/fluent-bit/fluent-bit.yaml と同じ作り）。
+# Docker のログドライバー（fluentd）から受けたログを、タグごとにファイルに書く。
+service:
+  flush: 1
+  daemon: false
+  log_level: info
+
+parsers:
+  - name: json
+    format: json
+    time_key: false
+
+pipeline:
+  inputs:
+    - name: forward
+      listen: 0.0.0.0
+      port: 24224
+      mem_buf_limit: 5MB
+
+  filters:
+    - name: parser
+      match: "app.*"
+      key_name: log
+      parser: json
+      reserve_data: false
+
+  outputs:
+    - name: file
+      match: app.provisioner
+      path: /output_logs
+      file: provisioner.log
+      format: plain
+
+    - name: file
+      match: app.provisioner-valkey
+      path: /output_logs
+      file: provisioner-valkey.log
+      format: plain
+
+    # 管理面の aka-ossbss とその PostgreSQL・cloudflared（aka-ossbss の compose.fluent-bit.yaml を重ねたとき。段階 3 の aka-ossbss で足す）
+    - name: file
+      match: app.ossbss
+      path: /output_logs
+      file: ossbss.log
+      format: plain
+
+    - name: file
+      match: app.ossbss-postgres
+      path: /output_logs
+      file: ossbss-postgres.log
+      format: plain
+
+    - name: file
+      match: app.ossbss-cloudflared
+      path: /output_logs
+      file: ossbss-cloudflared.log
+      format: plain

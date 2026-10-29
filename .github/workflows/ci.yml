@@ -1,4 +1,4 @@
-# テスト、イメージのビルドと compose の設定の確認、下流（本PoCの Provisioning API と aka-vecgen の管理API）との契約テストを行う。
+# テスト、イメージのビルドと compose の設定の確認、下流（aka-vecgen・aka-radius の管理API 2.0.0）との契約の試験を行う。
 name: CI
 
 on:
@@ -68,130 +68,110 @@ jobs:
       - uses: actions/checkout@v7
       - name: イメージのビルド
         run: docker build --build-arg VERSION="${GITHUB_SHA::7}" -t aka-provisioner:ci .
-      - name: compose の設定（下流が同一ホストと別ホスト）
+      - name: compose の設定（下流が別ホストと同一ホスト）
         run: |
           cp .env.example .env
           sed -i 's|^PROVISIONER_VALKEY_PASSWORD=.*|PROVISIONER_VALKEY_PASSWORD=ci|' .env
+          touch secrets/admin-clients
           docker compose config -q
-          docker compose config --services
-          COMPOSE_FILE=compose.yaml docker compose config -q
-          COMPOSE_FILE=compose.yaml:compose.eapaka-prov.yaml docker compose config -q
+          docker compose config --services | sort | tr '\n' ' ' | tee services.txt
+          test "$(cat services.txt)" = "aka-provisioner fluent-bit valkey "
+          COMPOSE_FILE=compose.yaml:compose.aka-radius-admin.yaml docker compose config -q
           COMPOSE_FILE=compose.yaml:compose.aka-av.yaml docker compose config -q
+          COMPOSE_FILE=compose.yaml:compose.aka-radius-admin.yaml:compose.aka-av.yaml docker compose config -q
+      - name: 起動と healthcheck（下流なし。登録簿は届かない宛先）
+        run: |
+          # 下流に届かなくても起動し、healthcheck（専用の Valkey に届くか）が通ることを確かめる。
+          go_image=aka-provisioner:ci
+          docker run --rm --entrypoint /aka-provisioner "$go_image" gen-client-cert -name provisioner-ci > downstreams/client.pem 2> gen.txt
+          cp downstreams/client.pem downstreams/vecgen-admin.pem
+          cp downstreams/client.pem downstreams/radius-admin.pem
+          sed -e 's#https://10.20.0.2:9443#https://127.0.0.1:1#' -e 's#https://10.20.0.2:9444#https://127.0.0.1:2#' \
+            downstreams/downstreams.example.json > downstreams/downstreams.json
+          docker run --rm --entrypoint /aka-provisioner -u 0 "$go_image" gen-client-cert -name ossbss-ci 2> ossbss.txt > /dev/null
+          grep -E '^ossbss-ci=' ossbss.txt > secrets/admin-clients
+          sudo chown -R 65532:65532 downstreams secrets/admin-clients audit
+          sudo chmod 600 downstreams/client.pem secrets/admin-clients
+          echo "PROVISIONER_VERSION=ci" >> .env
+          docker compose up -d --no-build
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q aka-provisioner)")" = healthy ] && break
+            sleep 2
+          done
+          docker compose ps
+          test "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q aka-provisioner)")" = healthy
+          # ログは Fluent Bit を通してファイルに書かれる。
+          sleep 3
+          sudo grep -q '"event_id":"DOWNSTREAMS_LOADED"' logs_on_host/provisioner.log
+          sudo grep -q '"event_id":"DOWNSTREAM_UNREACHABLE"' logs_on_host/provisioner.log
+      - name: compose のログ（失敗時）
+        if: failure()
+        run: docker compose logs --no-color || true
+      - name: 片付け
+        if: always()
+        run: docker compose down -v || true
 
   contract:
-    name: 下流との契約テスト
+    name: 下流との契約の試験
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # 契約テストの相手にする下流のコミット。下流の API を変えたら、その main に入った後のコミットに更新する。
-      # PoC セット（eapaka-pocset）のタグを付けるときは、その組み合わせの表のコミットと一致させる。
-      RADIUS_REF: dd107b36aa6d5d8f43af71d26d5bf96b0306044b
-      VECGEN_REF: 481a7cc69cda775e9ad63635a10ec9b41d8f8970
-    services:
-      # 下流がそれぞれ使う Valkey（このジョブ専用で、テストデータは最後に消える）。
-      prov-valkey:
-        image: valkey/valkey:9.1.2
-        ports:
-          - 16379:6379
-        options: >-
-          --health-cmd "valkey-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-      aka-valkey:
-        image: valkey/valkey:9.1.2
-        ports:
-          - 16380:6379
-        options: >-
-          --health-cmd "valkey-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
+      # 契約の試験の相手にする下流のコミット。aka-mvpset の versions.env の VECGEN_REF・RADIUS_REF と一致させる
+      # （下流の API を変えたら、その main に入った後のコミットに更新する）。
+      VECGEN_REF: 2d4837939660fbadcec67b27b4ac333f96a77374
+      RADIUS_REF: ac2f05aeda99472284f48b09943c1553476a6a7b
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: oyaguma3/aka-radius
-          ref: ${{ env.RADIUS_REF }}
-          path: aka-radius
       - uses: actions/checkout@v7
         with:
           repository: oyaguma3/aka-vecgen
           ref: ${{ env.VECGEN_REF }}
           path: aka-vecgen
+      - uses: actions/checkout@v7
+        with:
+          repository: oyaguma3/aka-radius
+          ref: ${{ env.RADIUS_REF }}
+          path: aka-radius
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: 下流と aka-provisioner のビルド
         run: |
-          git -C aka-radius log -1 --format='本PoC: %h %s'
           git -C aka-vecgen log -1 --format='aka-vecgen: %h %s'
-          (cd aka-radius/apps/provisioning-api && go build -o "$RUNNER_TEMP/provisioning-api" .)
-          (cd aka-vecgen && go build -o "$RUNNER_TEMP/aka-vecgen" ./cmd/aka-vecgen)
-          go build -o "$RUNNER_TEMP/aka-provisioner" ./cmd/aka-provisioner
-      - name: 証明書の作成と下流の起動
-        working-directory: ${{ runner.temp }}
-        run: |
-          # provisioner のクライアント証明書を作り、表示された値で下流 2 つに登録する。
-          ./aka-provisioner gen-client-cert -name provisioner-ci > client.pem 2> gen.txt
-          cat gen.txt
-          prov_clients=$(sed -n 's/^PROVISIONING_API_ADMIN_CLIENTS=//p' gen.txt)
-          aka_clients=$(sed -n 's/^VECGEN_ADMIN_CLIENTS=//p' gen.txt)
-
-          # provisioning-api のサーバー証明書は本PoCの B-02 §15.2 と同じ手順で作る。
-          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-            -keyout prov-server.key -out prov-server.pem -days 825 -subj "/CN=provisioning-api" \
-            -addext "subjectAltName=DNS:provisioning-api,DNS:localhost,IP:127.0.0.1"
-          PROVISIONING_API_LISTEN_ADDR=127.0.0.1:19444 \
-          PROVISIONING_API_TLS_CERT=prov-server.pem PROVISIONING_API_TLS_KEY=prov-server.key \
-          PROVISIONING_API_ADMIN_CLIENTS="$prov_clients" PROVISIONING_API_NODE_NAME=ci-node \
-          REDIS_HOST=127.0.0.1 REDIS_PORT=16379 LOG_LEVEL=INFO \
-            nohup ./provisioning-api > provisioning-api.log 2>&1 &
-
-          # aka-vecgen。vector-gateway の代わりの AVクライアント（ID 1）を登録しておく。
-          export VECGEN_VALKEY_ADDR=127.0.0.1:16380
-          ./aka-vecgen client gen-cert -name vector-gateway > vector-gateway.pem
-          ./aka-vecgen client add -name vector-gateway -cert vector-gateway.pem
-          VECGEN_ADMIN_ADDR=127.0.0.1:19443 VECGEN_AV_TLS_ADDR=127.0.0.1:18443 \
-          VECGEN_ADMIN_TLS_HOSTS=localhost,127.0.0.1 VECGEN_AV_TLS_HOSTS=localhost,127.0.0.1 \
-          VECGEN_ADMIN_CLIENTS="$aka_clients" \
-            nohup ./aka-vecgen > aka-vecgen.log 2>&1 &
-          for i in $(seq 1 30); do
-            ./aka-vecgen admin-cert > aka-server.pem 2>/dev/null && grep -q 'BEGIN CERTIFICATE' aka-server.pem && exit 0
-            sleep 1
-          done
-          exit 1
-      - name: 下流に接続できるまで待つ
+          git -C aka-radius log -1 --format='aka-radius: %h %s'
+          mkdir -p "$RUNNER_TEMP/bin"
+          (cd aka-vecgen && go build -o "$RUNNER_TEMP/bin/aka-vecgen" ./cmd/aka-vecgen)
+          (cd aka-radius && go build -o "$RUNNER_TEMP/bin/aka-radius" ./cmd/aka-radius)
+          go build -o "$RUNNER_TEMP/bin/aka-provisioner" ./cmd/aka-provisioner
+      - name: 口の一覧と下流の OpenAPI の突き合わせ
         env:
-          PROVISIONER_CLIENT_CERT: ${{ runner.temp }}/client.pem
-          PROVISIONER_PROV_URL: https://127.0.0.1:19444/admin/v1
-          PROVISIONER_PROV_SERVER_CERT: ${{ runner.temp }}/prov-server.pem
-          PROVISIONER_AKA_URL: https://127.0.0.1:19443/admin/v1
-          PROVISIONER_AKA_SERVER_CERT: ${{ runner.temp }}/aka-server.pem
-          PROVISIONER_AKA_AV_CLIENT_ID: "1"
-        run: |
-          for i in $(seq 1 30); do
-            "$RUNNER_TEMP/aka-provisioner" check-downstream && exit 0
-            sleep 1
-          done
-          exit 1
-      - name: 契約テスト
-        env:
-          PROVISIONER_TEST_CLIENT_CERT: ${{ runner.temp }}/client.pem
-          PROVISIONER_TEST_PROV_URL: https://127.0.0.1:19444/admin/v1
-          PROVISIONER_TEST_PROV_SERVER_CERT: ${{ runner.temp }}/prov-server.pem
-          PROVISIONER_TEST_AKA_URL: https://127.0.0.1:19443/admin/v1
-          PROVISIONER_TEST_AKA_SERVER_CERT: ${{ runner.temp }}/aka-server.pem
+          PROVISIONER_TEST_VECGEN_OPENAPI: ${{ github.workspace }}/aka-vecgen/docs/openapi/admin-api.yaml
+          PROVISIONER_TEST_RADIUS_OPENAPI: ${{ github.workspace }}/aka-radius/docs/openapi/admin-api.yaml
         run: |
           set -o pipefail
-          go test -count=1 -race -run Integration -v ./internal/provapi/ ./internal/akaapi/ | tee contract.log
-          # 接続先の指定が漏れると契約テストはスキップされ、テスト自体は成功してしまうので、別に確かめる。
-          if grep -q -- '--- SKIP' contract.log; then
-            echo "契約テストがスキップされました"
+          go test -count=1 -run TestAllowlistMatchesOpenAPI -v ./internal/api/ | tee openapi.log
+          # 下流の OpenAPI が渡らないと試験は飛ばされ、成功してしまうので、別に確かめる。
+          if grep -q -- '--- SKIP' openapi.log; then
+            echo "突き合わせの試験が飛ばされました"
             exit 1
           fi
-      - name: 下流のログ（失敗時）
+      - name: 下流と aka-provisioner の起動
+        run: scripts/contract.sh up "$RUNNER_TEMP/bin" "$RUNNER_TEMP/work"
+      - name: 契約の試験
+        run: |
+          set -o pipefail
+          . "$RUNNER_TEMP/work/contract.env"
+          go test -count=1 -race -v ./internal/contract/ | tee contract.log
+          if grep -q -- '--- SKIP' contract.log; then
+            echo "契約の試験が飛ばされました"
+            exit 1
+          fi
+      - name: 下流と aka-provisioner のログ（失敗時）
         if: failure()
         run: |
-          echo "---- provisioning-api ----"; cat "$RUNNER_TEMP/provisioning-api.log"
-          echo "---- aka-vecgen ----"; cat "$RUNNER_TEMP/aka-vecgen.log"
+          for f in aka-vecgen aka-radius aka-provisioner; do
+            echo "---- $f ----"; cat "$RUNNER_TEMP/work/$f.log" || true
+          done
+      - name: 片付け
+        if: always()
+        run: scripts/contract.sh down "$RUNNER_TEMP/work" || true

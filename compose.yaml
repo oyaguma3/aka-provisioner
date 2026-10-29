@@ -1,17 +1,27 @@
+# aka-provisioner（管理面のノード）。aka-provisioner・専用の Valkey・管理面の Fluent Bit を動かす（設計概要 §12）。
+# 管理面の aka-ossbss（と段階 4 の radsec-ca）のログも、この Fluent Bit に送る（それぞれの compose.fluent-bit.yaml を重ねる）。
+
+x-logging: &fluent-bit-logging
+  driver: fluentd
+  options: &fluent-bit-options
+    fluentd-address: localhost:${PROVISIONER_FLUENT_BIT_PORT:-24224}
+    fluentd-async: "true"
+    fluentd-buffer-limit: "1048576"
+
 services:
   aka-provisioner:
     build:
       context: .
       args:
         VERSION: ${PROVISIONER_VERSION:-dev}
+    image: aka-provisioner:${PROVISIONER_VERSION:-dev}
     restart: unless-stopped
-    # 停止の合図から、API のサーバーを閉じ終えるまで最大 10 秒、ワーカーが処理中の操作を終えるまで最大 15 秒かかる。
-    # Docker の既定の猶予（10 秒）では途中で強制終了されるので、長くする。
-    stop_grace_period: 30s
+    # 停止の合図から、API のサーバーを閉じ終えるまで最大 10 秒かかる。
+    stop_grace_period: 15s
     depends_on:
       valkey:
         condition: service_healthy
-    # API の待ち受けに接続できるかを確かめる（distroless のため curl はない。mTLS なので TCP の接続まで）。
+    # ループバックの healthcheck の口（専用の Valkey に届くか）を確かめる（distroless のため curl はない）。
     healthcheck:
       test: ["CMD", "/aka-provisioner", "healthcheck"]
       interval: 10s
@@ -23,40 +33,47 @@ services:
       PROVISIONER_TLS_CERT: ${PROVISIONER_TLS_CERT:-/data/tls/cert.pem}
       PROVISIONER_TLS_KEY: ${PROVISIONER_TLS_KEY:-/data/tls/key.pem}
       PROVISIONER_TLS_HOSTS: ${PROVISIONER_TLS_HOSTS:-localhost,127.0.0.1,aka-provisioner}
-      PROVISIONER_ADMIN_CLIENTS: ${PROVISIONER_ADMIN_CLIENTS:-}
-      PROVISIONER_CLIENT_CERT: /certs/client.pem
-      PROVISIONER_CLIENT_KEY: ${PROVISIONER_CLIENT_KEY:-}
-      PROVISIONER_PROV_URL: ${PROVISIONER_PROV_URL:-https://provisioning-api:9444/admin/v1}
-      PROVISIONER_PROV_SERVER_CERT: /certs/prov-server.pem
-      PROVISIONER_AKA_URL: ${PROVISIONER_AKA_URL:-}
-      PROVISIONER_AKA_SERVER_CERT: /certs/aka-server.pem
-      PROVISIONER_AKA_AV_CLIENT_ID: ${PROVISIONER_AKA_AV_CLIENT_ID:-}
-      PROVISIONER_PLMN_MAP: ${PROVISIONER_PLMN_MAP:-}
+      PROVISIONER_ADMIN_CLIENTS_FILE: /run/secrets/admin-clients
+      PROVISIONER_DOWNSTREAMS_FILE: /etc/aka-provisioner/downstreams/downstreams.json
       PROVISIONER_DOWNSTREAM_TIMEOUT: ${PROVISIONER_DOWNSTREAM_TIMEOUT:-5s}
       PROVISIONER_VALKEY_ADDR: valkey:6379
       PROVISIONER_VALKEY_PASSWORD: ${PROVISIONER_VALKEY_PASSWORD:?.env に PROVISIONER_VALKEY_PASSWORD を設定してください}
-      PROVISIONER_AUDIT_MAX: ${PROVISIONER_AUDIT_MAX:-10000}
+      PROVISIONER_AUDIT_MAX: ${PROVISIONER_AUDIT_MAX:-100000}
+      PROVISIONER_AUDIT_DIR: /data/audit
+      PROVISIONER_AUDIT_RETENTION_DAYS: ${PROVISIONER_AUDIT_RETENTION_DAYS:-14}
       PROVISIONER_LOG_LEVEL: ${PROVISIONER_LOG_LEVEL:-info}
+      TZ: Asia/Tokyo
+    secrets:
+      - admin-clients
     volumes:
       # 自動生成したサーバー証明書を保存する。
       - provisioner-data:/data
-      # 下流用の証明書（client.pem: gen-client-cert で作った provisioner のクライアント証明書と秘密鍵、
-      # prov-server.pem: 本PoCの provisioning-api のサーバー証明書、aka-server.pem: aka-vecgen の管理API のサーバー証明書）と、
-      # 持ち込みのサーバー証明書を置く。コンテナは UID 65532 で動くので、ファイルはこの UID で読めるようにする。
+      # 下流の登録簿 downstreams.json と、provisioner のクライアント証明書と鍵、下流のサーバー証明書（設計概要 §8.1）。
+      # ディレクトリごとマウントする（SIGHUP で読み直すとき、mv で置き換えたファイルも見えるように）。
+      # コンテナは UID 65532 で動くので、ファイルはこの UID で読めるようにする。
+      - ./downstreams:/etc/aka-provisioner/downstreams:ro
+      # 監査ログの日ごとのファイル（監視用の PC が取りに行く）。
+      - ./audit:/data/audit
+      # 持ち込みのサーバー証明書を置く場合（PROVISIONER_TLS_CERT・_KEY に /certs/... を指定する）。
       - ./certs:/certs:ro
     ports:
-      # Docker が公開したポートは ufw の規則を通らない。公開範囲はここのバインド先（VPN 側のアドレス）で制御する。
+      # Docker が公開したポートは ufw の規則を通らない。公開範囲はここのバインド先（サービス用の WireGuard のアドレス）で制御する。
       - "${PROVISIONER_PUBLISH:-127.0.0.1:9446}:9446"
     networks:
       - default
-      # 同一ホストの管理クライアント（BFF など）は、この共有ネットワークに参加して https://aka-provisioner:9446 で接続する。
+      # 同一ホストの管理クライアント（aka-ossbss）は、この共有ネットワークに参加して https://aka-provisioner:9446 で接続する。
       - shared
+    logging:
+      <<: *fluent-bit-logging
+      options:
+        <<: *fluent-bit-options
+        tag: app.provisioner
 
   valkey:
     image: valkey/valkey:9.1.2
     restart: unless-stopped
-    # 操作の記録・ロック・Idempotency-Key・監査ログを保存する（provisioner 専用。下流の Valkey とは別）。
-    # 操作の記録は補償・やり直しに使うので、AOF は書き込みごとに同期する。
+    # Idempotency-Key の記録と監査ログを保存する（provisioner 専用。下流の Valkey とは別）。
+    # Idempotency-Key の記録を失わないよう、AOF は書き込みごとに同期する。
     command: ["valkey-server", "--appendonly", "yes", "--appendfsync", "always", "--requirepass", "${PROVISIONER_VALKEY_PASSWORD}"]
     environment:
       VALKEY_PASSWORD: ${PROVISIONER_VALKEY_PASSWORD:?.env に PROVISIONER_VALKEY_PASSWORD を設定してください}
@@ -70,6 +87,33 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    logging:
+      <<: *fluent-bit-logging
+      options:
+        <<: *fluent-bit-options
+        tag: app.provisioner-valkey
+
+  # 管理面の Fluent Bit。Docker のログドライバー（fluentd）からログを受け、アプリごとのファイルに書く
+  # （設計概要 §10。aka-radius の Fluent Bit と同じ作り）。ファイルはホストの logrotate で日ごとに圧縮し、2 週間持つ。
+  fluent-bit:
+    image: fluent/fluent-bit:4.2.8
+    command: ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.yaml"]
+    restart: unless-stopped
+    # Docker のログドライバーはホストの localhost に接続する。外部には公開しない。
+    # 同じホストで aka-radius の Fluent Bit（24224）と並べて試すときは、PROVISIONER_FLUENT_BIT_PORT を変える。
+    ports:
+      - "127.0.0.1:${PROVISIONER_FLUENT_BIT_PORT:-24224}:24224"
+    volumes:
+      - ./configs/fluent-bit/fluent-bit.yaml:/fluent-bit/etc/fluent-bit.yaml:ro
+      - ./logs_on_host:/output_logs
+    environment:
+      TZ: Asia/Tokyo
+
+secrets:
+  # 管理クライアント（aka-ossbss）のピンのファイル（1 行に「識別名=フィンガープリント」）。SIGHUP で読み直す。
+  # ファイルごとのマウントなので、その場で書き換える（mv で置き換えたら --force-recreate で作り直す）。
+  admin-clients:
+    file: ./secrets/admin-clients
 
 networks:
   default:
