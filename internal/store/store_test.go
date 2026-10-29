@@ -1,7 +1,6 @@
 package store
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -42,13 +41,10 @@ func TestAudit(t *testing.T) {
 		t.Errorf("empty: %v, %q, %v", got, next, err)
 	}
 	for i := range 5 {
-		e := AuditEntry{Operator: "alice", MgmtClient: "bff", Action: "policy.create", Target: fmt.Sprint(i),
-			TraceID: "t" + fmt.Sprint(i), Result: "completed", Details: `{"downstream":"prov"}`}
-		if i == 4 {
-			e.OperationID = "op-1"
-		}
-		if err := s.AppendAudit(ctx, e, 1000); err != nil {
-			t.Fatal(err)
+		e := AuditEntry{Operator: "alice", MgmtClient: "ossbss", Action: "vecgen.subscriber.create", Target: fmt.Sprint(i),
+			TraceID: "t" + fmt.Sprint(i), Detail: `{"downstream":"vecgen"}`}
+		if id, err := s.AppendAudit(ctx, e, 1000); err != nil || id == "" {
+			t.Fatal(id, err)
 		}
 	}
 	// 新しい順に返り、nextBefore で続きをたどれる。
@@ -60,12 +56,9 @@ func TestAudit(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, e := range got {
-			if e.Operator != "alice" || e.MgmtClient != "bff" || e.Action != "policy.create" || e.Result != "completed" ||
-				e.TraceID != "t"+e.Target || e.Details != `{"downstream":"prov"}` || time.Since(e.Time) > time.Minute || e.ID == "" {
+			if e.Operator != "alice" || e.MgmtClient != "ossbss" || e.Action != "vecgen.subscriber.create" ||
+				e.TraceID != "t"+e.Target || e.Detail != `{"downstream":"vecgen"}` || time.Since(e.Time) > time.Minute || e.ID == "" {
 				t.Errorf("entry = %+v", e)
-			}
-			if (e.Target == "4") != (e.OperationID == "op-1") {
-				t.Errorf("operation id = %+v", e)
 			}
 			targets = append(targets, e.Target)
 		}
@@ -76,41 +69,6 @@ func TestAudit(t *testing.T) {
 	}
 	if want := []string{"4", "3", "2", "1", "0"}; !slices.Equal(targets, want) {
 		t.Errorf("targets = %v, want %v", targets, want)
-	}
-}
-
-func TestIMSILock(t *testing.T) {
-	s := openTestStore(t)
-	ctx := t.Context()
-	const imsi = "001010000000001"
-	token, err := s.AcquireIMSILock(ctx, imsi, time.Minute)
-	if err != nil || token == "" {
-		t.Fatalf("acquire: %q, %v", token, err)
-	}
-	if _, err := s.AcquireIMSILock(ctx, imsi, time.Minute); !errors.Is(err, ErrLocked) {
-		t.Errorf("second acquire: %v", err)
-	}
-	// 別の IMSI は取れる。
-	if _, err := s.AcquireIMSILock(ctx, "001010000000002", time.Minute); err != nil {
-		t.Errorf("other imsi: %v", err)
-	}
-	// 違うトークンでは解放されない。
-	if err := s.ReleaseIMSILock(ctx, imsi, "other"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.AcquireIMSILock(ctx, imsi, time.Minute); !errors.Is(err, ErrLocked) {
-		t.Errorf("after wrong release: %v", err)
-	}
-	if err := s.ReleaseIMSILock(ctx, imsi, token); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.AcquireIMSILock(ctx, imsi, 50*time.Millisecond); err != nil {
-		t.Errorf("after release: %v", err)
-	}
-	// 有効期限が過ぎると自然に外れる。
-	time.Sleep(100 * time.Millisecond)
-	if _, err := s.AcquireIMSILock(ctx, imsi, time.Minute); err != nil {
-		t.Errorf("after expiry: %v", err)
 	}
 }
 
@@ -140,7 +98,7 @@ func TestIdempotency(t *testing.T) {
 		t.Errorf("other client: %v", st)
 	}
 
-	want := StoredResponse{Status: 201, ContentType: "application/json", Location: "/admin/v1/clients/7", Body: []byte(`{"id":7}`)}
+	want := StoredResponse{Status: 201, ContentType: "application/json", Location: "/admin/v2/vecgen/subscribers/440100123456789", Body: []byte(`{"imsi":"440100123456789"}`)}
 	if err := s.CompleteIdempotent(ctx, "bff", "k1", "h1", want, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -184,96 +142,5 @@ func TestIdempotency(t *testing.T) {
 	}
 	if st, got := begin("bff", "k3", "h1"); st != IdempotencyReplay || got.Status != 204 || len(got.Body) != 0 {
 		t.Errorf("204 replay: %v, %+v", st, got)
-	}
-}
-
-func TestOperation(t *testing.T) {
-	s := openTestStore(t)
-	ctx := t.Context()
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	op := Operation{
-		ID: "op-1", Kind: "subscriber.update", IMSI: "001010000000001", KeyStore: "poc", Status: OpRunning,
-		Steps: []OperationStep{
-			{Name: "policy.put", Downstream: "prov", State: StepDone},
-			{Name: "subscriber.update", Downstream: "prov", State: StepFailed,
-				Error: &StepError{Status: 503, Cause: "DOWNSTREAM_UNAVAILABLE", Detail: "timeout", Time: now}},
-		},
-		NextAttemptAt: now.Add(time.Minute), Operator: "alice", MgmtClient: "bff", TraceID: "t1",
-		CreatedAt: now, UpdatedAt: now, PrevPolicy: `{"default":"deny","rules":[]}`, HadPolicy: true,
-	}
-	if err := s.SaveOperation(ctx, op, time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.GetOperation(ctx, "op-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Kind != op.Kind || got.IMSI != op.IMSI || got.Status != OpRunning || len(got.Steps) != 2 ||
-		got.Steps[1].Error == nil || got.Steps[1].Error.Status != 503 || !got.Steps[1].Error.Time.Equal(now) ||
-		!got.NextAttemptAt.Equal(op.NextAttemptAt) || !got.CreatedAt.Equal(now) || got.PrevPolicy != op.PrevPolicy || !got.HadPolicy ||
-		got.Operator != "alice" || got.MgmtClient != "bff" || got.TraceID != "t1" || got.Final() {
-		t.Errorf("got = %+v", got)
-	}
-	// 未完了なら ops:active に入り、期限はない。
-	if score, err := s.c.Do(ctx, s.c.B().Zscore().Key(keyActiveOps).Member("op-1").Build()).AsFloat64(); err != nil ||
-		int64(score) != op.NextAttemptAt.UnixMilli() {
-		t.Errorf("active score = %v, %v", score, err)
-	}
-	if ttl, _ := s.c.Do(ctx, s.c.B().Pttl().Key(opKey("op-1")).Build()).AsInt64(); ttl != -1 {
-		t.Errorf("ttl while running = %d", ttl)
-	}
-
-	// 完了したら ops:active から外れ、retention の後に消える。
-	op.Status, op.Attempts = OpRolledBack, 1
-	if err := s.SaveOperation(ctx, op, time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	if n, _ := s.c.Do(ctx, s.c.B().Zcard().Key(keyActiveOps).Build()).AsInt64(); n != 0 {
-		t.Errorf("active after final = %d", n)
-	}
-	if ttl, _ := s.c.Do(ctx, s.c.B().Pttl().Key(opKey("op-1")).Build()).AsInt64(); ttl <= 0 || ttl > time.Hour.Milliseconds() {
-		t.Errorf("ttl after final = %d", ttl)
-	}
-	if got, err := s.GetOperation(ctx, "op-1"); err != nil || got.Status != OpRolledBack || got.Attempts != 1 || !got.Final() {
-		t.Errorf("final = %+v, %v", got, err)
-	}
-	if _, err := s.GetOperation(ctx, "none"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("missing: %v", err)
-	}
-}
-
-func TestDueOperations(t *testing.T) {
-	s := openTestStore(t)
-	ctx := t.Context()
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	save := func(id, status string, next time.Time) {
-		t.Helper()
-		op := Operation{ID: id, Kind: "subscriber.delete", Status: status, NextAttemptAt: next, CreatedAt: now, Steps: []OperationStep{}}
-		if err := s.SaveOperation(ctx, op, time.Hour); err != nil {
-			t.Fatal(err)
-		}
-	}
-	save("op-c", OpRetrying, now.Add(-time.Second))
-	save("op-a", OpRunning, now.Add(-time.Minute))
-	save("op-b", OpRetrying, now.Add(time.Minute)) // まだ
-	save("op-d", OpFailed, now.Add(-time.Hour))    // failed は自動では拾わない
-	save("op-e", OpCompleted, now.Add(-time.Hour)) // 完了は入らない
-
-	if ids, err := s.DueOperations(ctx, now, 10); err != nil || !slices.Equal(ids, []string{"op-a", "op-c"}) {
-		t.Errorf("due = %v, %v", ids, err)
-	}
-	if ids, _ := s.DueOperations(ctx, now, 1); !slices.Equal(ids, []string{"op-a"}) {
-		t.Errorf("due limit = %v", ids)
-	}
-	ids, err := s.ActiveOperations(ctx)
-	slices.Sort(ids)
-	if err != nil || !slices.Equal(ids, []string{"op-a", "op-b", "op-c", "op-d"}) {
-		t.Errorf("active = %v, %v", ids, err)
-	}
-	if err := s.RemoveActive(ctx, "op-a"); err != nil {
-		t.Fatal(err)
-	}
-	if ids, _ := s.DueOperations(ctx, now, 10); !slices.Equal(ids, []string{"op-c"}) {
-		t.Errorf("after remove = %v", ids)
 	}
 }

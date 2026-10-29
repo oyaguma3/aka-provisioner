@@ -1,47 +1,44 @@
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json/v2"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
 	"github.com/oyaguma3/aka-provisioner/internal/audit"
+	"github.com/oyaguma3/aka-provisioner/internal/certs"
 	"github.com/oyaguma3/aka-provisioner/internal/downstream"
-	"github.com/oyaguma3/aka-provisioner/internal/plmn"
-	"github.com/oyaguma3/aka-provisioner/internal/provapi"
 	"github.com/oyaguma3/aka-provisioner/internal/store"
 	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
-// ---- 偽物 ----
-
-// fakeDownstream は下流の偽物。Relay の要求を記録し、relay で決めた応答を返す。
-type fakeDownstream struct {
-	mu      sync.Mutex
-	baseURL string
-	relay   func(req downstream.RelayRequest) (downstream.RelayResponse, error)
-	// requests は Relay の要求、operators と traces はそのときのコンテキストの操作者とトレースID。
+// fakeRelayer は下流の代わり。受けた要求を記録し、relay で応える（nil なら 200 の空の JSON）。
+type fakeRelayer struct {
+	mu        sync.Mutex
+	baseURL   string
+	cert      *x509.Certificate
+	relay     func(downstream.RelayRequest) (downstream.RelayResponse, error)
 	requests  []downstream.RelayRequest
 	operators []string
 	traces    []string
 }
 
-func (f *fakeDownstream) BaseURL() string { return f.baseURL }
-func (f *fakeDownstream) Relay(ctx context.Context, req downstream.RelayRequest) (downstream.RelayResponse, error) {
+func (f *fakeRelayer) BaseURL() string                      { return f.baseURL }
+func (f *fakeRelayer) ServerCertificate() *x509.Certificate { return f.cert }
+func (f *fakeRelayer) Relay(ctx context.Context, req downstream.RelayRequest) (downstream.RelayResponse, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
 	f.operators = append(f.operators, downstream.OperatorFrom(ctx))
@@ -54,81 +51,41 @@ func (f *fakeDownstream) Relay(ctx context.Context, req downstream.RelayRequest)
 	return relay(req)
 }
 
-func (f *fakeDownstream) calls() int {
+func (f *fakeRelayer) calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.requests)
 }
 
-type fakeProv struct {
-	fakeDownstream
-	status provapi.Status
-	err    error
-	// statusOperators は Status のコンテキストに入っていた操作者。
-	statusOperators []string
-}
-
-func (f *fakeProv) Status(ctx context.Context) (provapi.Status, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.statusOperators = append(f.statusOperators, downstream.OperatorFrom(ctx))
-	return f.status, f.err
-}
-
-type fakeAka struct {
-	fakeDownstream
-	status    akaapi.Status
-	statusErr error
-	av        akaapi.AVClient
-	avErr     error
-}
-
-func (f *fakeAka) Status(context.Context) (akaapi.Status, error) { return f.status, f.statusErr }
-func (f *fakeAka) GetAVClient(context.Context, int64) (akaapi.AVClient, error) {
-	return f.av, f.avErr
-}
-
-// memStore は provisioner 専用 Valkey の偽物（メモリ上。ロックと Idempotency-Key の振る舞いを持つ）。
+// memStore は Valkey の代わり（監査ログの Stream と Idempotency-Key の記録）。
 type memStore struct {
-	mu        sync.Mutex
-	pingErr   error
-	auditErr  error
-	audits    []store.AuditEntry
-	locks     map[string]string
-	idem      map[string]*memIdem
-	nextToken int
+	mu      sync.Mutex
+	pingErr error
+	audits  []store.AuditEntry
+	idem    map[string]idemRecord
 }
 
-type memIdem struct {
+type idemRecord struct {
 	hash string
 	done bool
 	resp store.StoredResponse
 }
 
-func newMemStore() *memStore {
-	return &memStore{locks: map[string]string{}, idem: map[string]*memIdem{}}
-}
-
 func (m *memStore) Ping(context.Context) error { return m.pingErr }
 
-func (m *memStore) AppendAudit(_ context.Context, e store.AuditEntry, _ int64) error {
+func (m *memStore) AppendAudit(_ context.Context, e store.AuditEntry, _ int64) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.auditErr != nil {
-		return m.auditErr
-	}
-	e.ID = fmt.Sprintf("%d-0", len(m.audits)+1)
-	e.Time = time.Now().UTC()
+	e.ID = strconv.Itoa(len(m.audits)+1) + "-0"
 	m.audits = append(m.audits, e)
-	return nil
+	return e.ID, nil
 }
 
 func (m *memStore) ListAudit(_ context.Context, before string, limit int) ([]store.AuditEntry, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []store.AuditEntry
-	for i := len(m.audits) - 1; i >= 0; i-- {
-		e := m.audits[i]
+	for _, e := range slices.Backward(m.audits) {
 		if before != "" && e.ID >= before {
 			continue
 		}
@@ -148,34 +105,14 @@ func (m *memStore) auditEntries() []store.AuditEntry {
 	return slices.Clone(m.audits)
 }
 
-func (m *memStore) AcquireIMSILock(_ context.Context, imsi string, _ time.Duration) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.locks[imsi]; ok {
-		return "", store.ErrLocked
-	}
-	m.nextToken++
-	token := fmt.Sprint(m.nextToken)
-	m.locks[imsi] = token
-	return token, nil
-}
-
-func (m *memStore) ReleaseIMSILock(_ context.Context, imsi, token string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.locks[imsi] == token {
-		delete(m.locks, imsi)
-	}
-	return nil
-}
-
 func (m *memStore) BeginIdempotent(_ context.Context, client, key, hash string, _ time.Duration) (store.IdempotencyState, store.StoredResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	rec, ok := m.idem[client+":"+key]
+	k := client + "/" + key
+	rec, ok := m.idem[k]
 	switch {
 	case !ok:
-		m.idem[client+":"+key] = &memIdem{hash: hash}
+		m.idem[k] = idemRecord{hash: hash}
 		return store.IdempotencyNew, store.StoredResponse{}, nil
 	case rec.hash != hash:
 		return store.IdempotencyMismatch, store.StoredResponse{}, nil
@@ -188,98 +125,100 @@ func (m *memStore) BeginIdempotent(_ context.Context, client, key, hash string, 
 func (m *memStore) CompleteIdempotent(_ context.Context, client, key, hash string, resp store.StoredResponse, _ time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if rec, ok := m.idem[client+":"+key]; ok && rec.hash == hash {
-		rec.done, rec.resp = true, resp
-	}
+	m.idem[client+"/"+key] = idemRecord{hash: hash, done: true, resp: resp}
 	return nil
 }
 
-func (m *memStore) AbandonIdempotent(_ context.Context, client, key, hash string) error {
+func (m *memStore) AbandonIdempotent(_ context.Context, client, key, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if rec, ok := m.idem[client+":"+key]; ok && rec.hash == hash && !rec.done {
-		delete(m.idem, client+":"+key)
-	}
+	delete(m.idem, client+"/"+key)
 	return nil
 }
 
-type env struct {
-	h    http.Handler
-	prov *fakeProv
-	aka  *fakeAka
-	st   *memStore
-	subs *fakeSubs
-	logs *lockedBuffer
-}
-
-// lockedBuffer は、ハンドラーのゴルーチンが書くログを、テストから安全に読むためのバッファ。
 type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu sync.Mutex
+	b  bytes.Buffer
 }
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	return b.b.Write(p)
 }
 
-func (b *lockedBuffer) Bytes() []byte {
+func (b *lockedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return slices.Clone(b.buf.Bytes())
+	return b.b.String()
 }
 
-func newEnv(t *testing.T, withAka bool) *env {
+type env struct {
+	h      http.Handler
+	st     *memStore
+	vecgen *fakeRelayer
+	radius *fakeRelayer
+	poller *Poller
+	logs   *lockedBuffer
+}
+
+func testCert(t *testing.T, name string) *x509.Certificate {
 	t.Helper()
-	m, err := plmn.Parse("00102:01,001010:00")
+	certPEM, keyPEM, err := certs.SelfSigned(name, []string{name}, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
+	c, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.Leaf
+}
+
+func newEnv(t *testing.T) *env {
+	t.Helper()
 	e := &env{
-		prov: &fakeProv{
-			fakeDownstream: fakeDownstream{baseURL: "https://provisioning-api:9444/admin/v1"},
-			status:         provapi.Status{Version: "0.3.0", NodeName: "poc-01", SubscriberCount: 3},
-		},
-		aka: &fakeAka{
-			fakeDownstream: fakeDownstream{baseURL: "https://aka-vecgen:9443/admin/v1"},
-			status:         akaapi.Status{Version: "1.0.0", SubscriberCount: 7},
-			av:             akaapi.AVClient{ID: 2, Name: "vector-gateway", Enabled: true},
-		},
-		st:   newMemStore(),
-		subs: &fakeSubs{},
-		logs: &lockedBuffer{},
+		st:     &memStore{idem: map[string]idemRecord{}},
+		vecgen: &fakeRelayer{baseURL: "https://vecgen.example:9443/admin/v2", cert: testCert(t, "vecgen.example")},
+		radius: &fakeRelayer{baseURL: "https://radius.example:9444/admin/v2", cert: testCert(t, "radius.example")},
+		logs:   &lockedBuffer{},
 	}
+	log := slog.New(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	relayer := func(n downstream.Name) Relayer {
+		if n == downstream.Vecgen {
+			return e.vecgen
+		}
+		return e.radius
+	}
+	e.poller = &Poller{Downstream: relayer, Log: log}
+	client := testCert(t, "provisioner")
+	server := testCert(t, "aka-provisioner")
 	h := &Handler{
-		Log:               slog.New(slog.NewJSONHandler(e.logs, nil)),
-		MgmtClient:        func(*http.Request) string { return "bff-01" },
-		Prov:              e.prov,
-		PLMNMap:           m,
-		Store:             e.st,
-		Subscribers:       e.subs,
-		DownstreamTimeout: time.Second,
-		Version:           "test",
-		StartedAt:         time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC),
-	}
-	h.Audit = &audit.Recorder{Log: h.Log, Store: e.st, MaxLen: 1000}
-	if withAka {
-		h.Aka, h.AkaAVClientID = e.aka, 2
+		Log:        log,
+		MgmtClient: func(*http.Request) string { return "ossbss" },
+		Downstream: relayer,
+		Store:      e.st,
+		Audit:      &audit.Recorder{Log: log, Store: e.st, MaxLen: 100},
+		Status: &StatusSource{
+			Version:             "v-test",
+			StartedAt:           time.Date(2026, 10, 30, 1, 0, 0, 0, time.UTC),
+			AdminClients:        func() ([]string, time.Time) { return []string{"ossbss"}, time.Date(2026, 10, 30, 1, 0, 1, 0, time.UTC) },
+			DownstreamsLoadedAt: func() time.Time { return time.Date(2026, 10, 30, 1, 0, 2, 0, time.UTC) },
+			ClientCertificate:   func() *x509.Certificate { return client },
+			ServerCertificate:   func() *x509.Certificate { return server },
+			Poller:              e.poller,
+		},
 	}
 	e.h = h.Routes()
 	return e
 }
 
-func (e *env) do(method, path string, header map[string]string) *httptest.ResponseRecorder {
-	return e.doBody(method, path, header, "")
-}
-
-// doBody は本文つきの要求を送る（本文が空文字列なら送らない）。
-func (e *env) doBody(method, path string, header map[string]string, body string) *httptest.ResponseRecorder {
+func (e *env) do(method, path string, header map[string]string, body string) *httptest.ResponseRecorder {
 	var rd io.Reader
 	if body != "" {
 		rd = strings.NewReader(body)
 	}
-	r := httptest.NewRequest(method, "https://provisioner"+path, rd)
+	r := httptest.NewRequest(method, path, rd)
 	for k, v := range header {
 		r.Header.Set(k, v)
 	}
@@ -291,152 +230,328 @@ func (e *env) doBody(method, path string, header map[string]string, body string)
 func decode[T any](t *testing.T, w *httptest.ResponseRecorder, wantStatus int) T {
 	t.Helper()
 	if w.Code != wantStatus {
-		t.Fatalf("status = %d, want %d (body %s)", w.Code, wantStatus, w.Body)
+		t.Fatalf("status = %d, want %d: %s", w.Code, wantStatus, w.Body)
 	}
 	var v T
 	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
-		t.Fatalf("%v: %s", err, w.Body)
+		t.Fatalf("decode %s: %v", w.Body, err)
 	}
 	return v
 }
 
-// ---- /status ----
+func problemOf(t *testing.T, w *httptest.ResponseRecorder, wantStatus int) problem {
+	t.Helper()
+	if ct := w.Header().Get("Content-Type"); ct != "application/problem+json" {
+		t.Errorf("content-type = %q", ct)
+	}
+	return decode[problem](t, w, wantStatus)
+}
+
+// TestAllowlist は、許す口がすべて下流の同じメソッドとパスに届き、書き込みでは Idempotency-Key を求めることを確かめる。
+func TestAllowlist(t *testing.T) {
+	values := map[string]string{"{imsi}": "440100123456789", "{clientId}": "7"}
+	for _, name := range downstream.Names {
+		for _, rt := range allowlist[name] {
+			t.Run(string(name)+" "+rt.method+" "+rt.path, func(t *testing.T) {
+				e := newEnv(t)
+				fake := e.radius
+				if name == downstream.Vecgen {
+					fake = e.vecgen
+				}
+				path := rt.path
+				for k, v := range values {
+					path = strings.ReplaceAll(path, k, v)
+				}
+				url := basePath + "/" + string(name) + path + "?limit=5"
+				body := ""
+				if rt.method != http.MethodGet && rt.method != http.MethodDelete {
+					body = `{"state":"inactive"}`
+				}
+				if rt.write() {
+					// キーがなければ下流を呼ばずに 400。
+					p := problemOf(t, e.do(rt.method, url, nil, body), http.StatusBadRequest)
+					if p.Cause != causeMandatoryIEMissing || fake.calls() != 0 {
+						t.Errorf("without key: %+v, calls %d", p, fake.calls())
+					}
+				}
+				w := e.do(rt.method, url, map[string]string{"Idempotency-Key": "k-1", "Content-Type": "application/json"}, body)
+				if w.Code != http.StatusOK || fake.calls() != 1 {
+					t.Fatalf("relay: %d %s, calls %d", w.Code, w.Body, fake.calls())
+				}
+				req := fake.requests[0]
+				if req.Method != rt.method || "/"+strings.Join(req.Path, "/") != path || req.RawQuery != "limit=5" || string(req.Body) != body {
+					t.Errorf("relayed = %+v, want %s %s", req, rt.method, path)
+				}
+				if got := len(e.st.auditEntries()); got != map[bool]int{true: 1, false: 0}[rt.write()] {
+					t.Errorf("audits = %d", got)
+				}
+			})
+		}
+	}
+}
+
+func TestDenied(t *testing.T) {
+	e := newEnv(t)
+	for _, c := range []struct{ method, path, ds string }{
+		{http.MethodGet, "/admin/v2/vecgen/subscribers/440100123456789/keys", "vecgen"}, // 鍵の読み出しは通さない
+		{http.MethodPost, "/admin/v2/radius/clients", "radius"},                         // RADIUS クライアントの書き込みはない
+		{http.MethodPut, "/admin/v2/radius/subscribers", "radius"},                      // メソッドが違うだけでも許さない
+		{http.MethodGet, "/admin/v2/vecgen/unknown", "vecgen"},
+	} {
+		p := problemOf(t, e.do(c.method, c.path, map[string]string{"Idempotency-Key": "k"}, ""), http.StatusNotFound)
+		if p.Cause != causeRouteNotAllowed || p.Downstream != c.ds {
+			t.Errorf("%s %s: %+v", c.method, c.path, p)
+		}
+	}
+	if e.vecgen.calls()+e.radius.calls() != 0 {
+		t.Error("denied routes reached a downstream")
+	}
+	if !strings.Contains(e.logs.String(), `"event_id":"RELAY_DENIED"`) {
+		t.Error("no RELAY_DENIED log")
+	}
+	// provisioner 自身の口は 404 と 405。
+	if p := problemOf(t, e.do(http.MethodGet, "/admin/v2/unknown", nil, ""), http.StatusNotFound); p.Cause != "" {
+		t.Errorf("unknown: %+v", p)
+	}
+	if w := e.do(http.MethodPost, "/admin/v2/status", nil, ""); w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "GET, HEAD" {
+		t.Errorf("405: %d %v", w.Code, w.Header())
+	}
+	// v1 の口はない。
+	if w := e.do(http.MethodGet, "/admin/v1/status", nil, ""); w.Code != http.StatusNotFound {
+		t.Errorf("v1: %d", w.Code)
+	}
+}
+
+func TestPathValues(t *testing.T) {
+	e := newEnv(t)
+	for _, path := range []string{
+		"/admin/v2/vecgen/subscribers/1234",                   // 短すぎる
+		"/admin/v2/radius/subscribers/4401001234567890",       // 長すぎる
+		"/admin/v2/radius/subscribers/44010012345678x",        // 数字でない
+		"/admin/v2/vecgen/clients/0",                          // 1 以上
+		"/admin/v2/vecgen/clients/07",                         // 先頭の 0
+		"/admin/v2/vecgen/subscribers/440100123456789%2Fkeys", // "/" を含む値
+	} {
+		p := problemOf(t, e.do(http.MethodGet, path, nil, ""), http.StatusBadRequest)
+		if p.Cause != causeMandatoryIEIncorrect {
+			t.Errorf("%s: %+v", path, p)
+		}
+	}
+	if e.vecgen.calls()+e.radius.calls() != 0 {
+		t.Error("bad path values reached a downstream")
+	}
+}
+
+func TestCreateAndAudit(t *testing.T) {
+	e := newEnv(t)
+	e.vecgen.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{Status: 201, ContentType: "application/json", Location: "/admin/v2/subscribers/440100123456789",
+			Body: []byte(`{"imsi":"440100123456789","state":"active"}`)}, nil
+	}
+	body := `{"imsi":"440100123456789","ki":"465b5ce8b199b49faa5f0a2ee238a6bc","opc":"cd63cb71954a9f4e48a5994e37a02baf","state":"active"}`
+	w := e.do(http.MethodPost, "/admin/v2/vecgen/subscribers", map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": "job-1:440100123456789", "X-Operator-Id": "alice", "X-Trace-ID": "trace-c1",
+	}, body)
+	if w.Code != 201 || w.Header().Get("Location") != "/admin/v2/vecgen/subscribers/440100123456789" ||
+		w.Header().Get("X-Trace-ID") != "trace-c1" || !strings.Contains(w.Body.String(), `"state":"active"`) {
+		t.Fatalf("response = %d %v %s", w.Code, w.Header(), w.Body)
+	}
+	// 操作者とトレースID を下流に渡す。aka-vecgen には Idempotency-Key を渡さない（RelayRequest にヘッダーはない）。
+	if e.vecgen.operators[0] != "alice" || e.vecgen.traces[0] != "trace-c1" || e.vecgen.requests[0].ContentType != "application/json" {
+		t.Errorf("operator %q trace %q", e.vecgen.operators[0], e.vecgen.traces[0])
+	}
+	audits := e.st.auditEntries()
+	if len(audits) != 1 {
+		t.Fatalf("audits = %+v", audits)
+	}
+	if a := audits[0]; a.Action != "vecgen.subscriber.create" || a.Target != "440100123456789" || a.Operator != "alice" ||
+		a.MgmtClient != "ossbss" || a.TraceID != "trace-c1" || a.Detail != `{"downstream":"vecgen","fields":["imsi","ki","opc","state"]}` {
+		t.Errorf("audit = %+v", a)
+	}
+	// 鍵はログにも監査ログにも残さない。
+	if strings.Contains(e.logs.String(), "465b5ce8b199b49faa5f0a2ee238a6bc") {
+		t.Error("key is logged")
+	}
+
+	// 状態の変更は IMSI を対象にする。失敗（4xx）は監査ログに残さない。
+	e.radius.relay = func(req downstream.RelayRequest) (downstream.RelayResponse, error) {
+		if req.Method == http.MethodDelete {
+			return downstream.RelayResponse{Status: 409, ContentType: "application/problem+json",
+				Body: []byte(`{"title":"Conflict","status":409,"cause":"SUBSCRIBER_ACTIVE"}`)}, nil
+		}
+		return downstream.RelayResponse{Status: 200, ContentType: "application/json", Body: []byte(`{}`)}, nil
+	}
+	e.do(http.MethodPut, "/admin/v2/radius/subscribers/440100123456789/state", map[string]string{"Idempotency-Key": "k-2"}, `{"state":"inactive","reason":"x"}`)
+	p := problemOf(t, e.do(http.MethodDelete, "/admin/v2/radius/subscribers/440100123456789", map[string]string{"Idempotency-Key": "k-3"}, ""), 409)
+	if p.Cause != "SUBSCRIBER_ACTIVE" || p.Downstream != "radius" {
+		t.Errorf("409 = %+v", p)
+	}
+	audits = e.st.auditEntries()
+	if len(audits) != 2 || audits[1].Action != "radius.subscriber.state" || audits[1].Target != "440100123456789" ||
+		audits[1].Detail != `{"downstream":"radius","fields":["reason","state"]}` {
+		t.Errorf("audits = %+v", audits)
+	}
+}
+
+func TestIdempotency(t *testing.T) {
+	e := newEnv(t)
+	e.radius.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{Status: 201, ContentType: "application/json", Location: "/admin/v2/subscribers/440100123456789",
+			Body: []byte(`{"imsi":"440100123456789"}`)}, nil
+	}
+	hdr := map[string]string{"Idempotency-Key": "k-1", "Content-Type": "application/json"}
+	body := `{"imsi":"440100123456789","state":"active","sourceId":"vecgen","rules":[]}`
+	first := e.do(http.MethodPost, "/admin/v2/radius/subscribers", hdr, body)
+	// 同じキー・同じ内容は、下流を呼ばずに最初の応答を返す。
+	again := e.do(http.MethodPost, "/admin/v2/radius/subscribers", hdr, body)
+	if again.Code != 201 || again.Header().Get("Idempotent-Replayed") != "true" || again.Body.String() != first.Body.String() ||
+		again.Header().Get("Location") != "/admin/v2/radius/subscribers/440100123456789" || e.radius.calls() != 1 {
+		t.Errorf("replay: %d %v %s, calls %d", again.Code, again.Header(), again.Body, e.radius.calls())
+	}
+	if len(e.st.auditEntries()) != 1 || !strings.Contains(e.logs.String(), `"event_id":"IDEMPOTENT_REPLAYED"`) {
+		t.Errorf("audits = %d", len(e.st.auditEntries()))
+	}
+	// 同じキーで内容が違えば 422。
+	if p := problemOf(t, e.do(http.MethodPost, "/admin/v2/radius/subscribers", hdr, `{"imsi":"440100123456780"}`), 422); p.Cause != causeIdempotencyKeyMismatch {
+		t.Errorf("mismatch = %+v", p)
+	}
+	// キーの形が違えば 400。
+	if p := problemOf(t, e.do(http.MethodDelete, "/admin/v2/radius/subscribers/440100123456789", map[string]string{"Idempotency-Key": "a b"}, ""), 400); p.Cause != causeOptionalIEIncorrect {
+		t.Errorf("bad key = %+v", p)
+	}
+	// 下流に接続できない（5xx）は覚えず、同じキーでやり直せる。
+	e.vecgen.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{}, errors.New("dial")
+	}
+	h2 := map[string]string{"Idempotency-Key": "k-5"}
+	e.do(http.MethodDelete, "/admin/v2/vecgen/subscribers/440100123456789", h2, "")
+	e.vecgen.relay = nil
+	if w := e.do(http.MethodDelete, "/admin/v2/vecgen/subscribers/440100123456789", h2, ""); w.Code != 200 || w.Header().Get("Idempotent-Replayed") != "" || e.vecgen.calls() != 2 {
+		t.Errorf("retry after 5xx: %d %v, calls %d", w.Code, w.Header(), e.vecgen.calls())
+	}
+}
+
+func TestDownstreamErrors(t *testing.T) {
+	e := newEnv(t)
+	// 下流の ProblemDetails は、ステータスと内容をそのまま返し、downstream を加える。
+	e.vecgen.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{Status: 404, ContentType: "application/problem+json",
+			Body: []byte(`{"title":"Not Found","status":404,"cause":"USER_NOT_FOUND"}`)}, nil
+	}
+	if p := problemOf(t, e.do(http.MethodGet, "/admin/v2/vecgen/subscribers/440100123456789", nil, ""), 404); p.Cause != "USER_NOT_FOUND" || p.Downstream != "vecgen" {
+		t.Errorf("passthrough = %+v", p)
+	}
+	// ProblemDetails でない誤りは 502。
+	e.vecgen.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{Status: 500, ContentType: "text/plain", Body: []byte("boom")}, nil
+	}
+	if p := problemOf(t, e.do(http.MethodGet, "/admin/v2/vecgen/status", nil, ""), 502); p.Cause != causeDownstreamError || p.Downstream != "vecgen" || p.DownstreamStatus != 500 {
+		t.Errorf("502 = %+v", p)
+	}
+	// 接続できなければ 503。
+	e.radius.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{}, errors.New("dial tcp: connection refused")
+	}
+	if p := problemOf(t, e.do(http.MethodGet, "/admin/v2/radius/sessions?tenantId=1", nil, ""), 503); p.Cause != causeDownstreamUnavailable || p.Downstream != "radius" {
+		t.Errorf("503 = %+v", p)
+	}
+	if !strings.Contains(e.logs.String(), `"event_id":"DOWNSTREAM_UNREACHABLE"`) {
+		t.Error("no DOWNSTREAM_UNREACHABLE log")
+	}
+}
+
+func TestOperatorAndTrace(t *testing.T) {
+	e := newEnv(t)
+	if p := problemOf(t, e.do(http.MethodGet, "/admin/v2/vecgen/status", map[string]string{"X-Operator-Id": "a b"}, ""), 400); p.Cause != causeOptionalIEIncorrect {
+		t.Errorf("bad operator = %+v", p)
+	}
+	// トレースID がない・形が違うときは採番して返し、下流にも同じ値を渡す。
+	w := e.do(http.MethodGet, "/admin/v2/vecgen/status", map[string]string{"X-Trace-ID": "bad trace"}, "")
+	if id := w.Header().Get("X-Trace-ID"); !trace.Valid(id) || id == "bad trace" || e.vecgen.traces[0] != id {
+		t.Errorf("trace = %q, relayed %q", id, e.vecgen.traces[0])
+	}
+	if !strings.Contains(e.logs.String(), `"event_id":"ADMIN_REQUEST"`) || !strings.Contains(e.logs.String(), `"mgmt_client":"ossbss"`) {
+		t.Errorf("request log: %s", e.logs.String())
+	}
+}
 
 func TestStatus(t *testing.T) {
-	e := newEnv(t, true)
-	got := decode[map[string]any](t, e.do("GET", "/admin/v1/status", nil), http.StatusOK)
-	want := map[string]any{
-		"version":   "test",
-		"startedAt": "2026-10-10T00:00:00Z",
-		"plmnMap": []any{
-			map[string]any{"plmn": "00102", "keyStore": "aka"},
-			map[string]any{"plmn": "001010", "keyStore": "poc"},
-		},
-		"downstreams": map[string]any{
-			"prov": map[string]any{"configured": true, "url": "https://provisioning-api:9444/admin/v1", "reachable": true,
-				"version": "0.3.0", "nodeName": "poc-01", "subscriberCount": 3.0},
-			"aka": map[string]any{"configured": true, "url": "https://aka-vecgen:9443/admin/v1", "reachable": true,
-				"version": "1.0.0", "subscriberCount": 7.0},
-		},
-		"avClient":   map[string]any{"id": 2.0, "exists": true, "enabled": true, "name": "vector-gateway"},
-		"valkey":     map[string]any{"reachable": true},
-		"operations": map[string]any{"running": 0.0, "retrying": 0.0, "failed": 0.0},
+	e := newEnv(t)
+	e.vecgen.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{Status: 200, ContentType: "application/json", Body: []byte(`{"version":"vg-1","subscriberCount":3}`)}, nil
 	}
-	if !jsonEqual(got, want) {
-		t.Errorf("status =\n%v\nwant\n%v", got, want)
+	e.radius.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{}, errors.New("dial tcp: connection refused")
+	}
+	// 集める前は、つながるかが分からない（reachable false、checkedAt なし）。
+	out := decode[map[string]any](t, e.do(http.MethodGet, "/admin/v2/status", nil, ""), 200)
+	ds := out["downstreams"].([]any)
+	if len(ds) != 2 || ds[0].(map[string]any)["reachable"] != false || ds[0].(map[string]any)["checkedAt"] != nil {
+		t.Errorf("before poll = %v", ds)
+	}
+
+	e.poller.PollOnce(t.Context())
+	out = decode[map[string]any](t, e.do(http.MethodGet, "/admin/v2/status", nil, ""), 200)
+	if out["version"] != "v-test" || out["valkey"].(map[string]any)["reachable"] != true ||
+		!slices.Equal(out["adminClients"].([]any), []any{"ossbss"}) || out["downstreamsLoadedAt"] != "2026-10-30T01:00:02Z" ||
+		out["clientCertificate"].(map[string]any)["subject"] != "CN=provisioner" {
+		t.Errorf("status = %v", out)
+	}
+	ds = out["downstreams"].([]any)
+	vg, rd := ds[0].(map[string]any), ds[1].(map[string]any)
+	if vg["name"] != "vecgen" || vg["url"] != "https://vecgen.example:9443/admin/v2" || vg["reachable"] != true ||
+		vg["status"].(map[string]any)["subscriberCount"] != float64(3) || vg["serverCertificate"].(map[string]any)["subject"] != "CN=vecgen.example" {
+		t.Errorf("vecgen = %v", vg)
+	}
+	if rd["name"] != "radius" || rd["reachable"] != false || rd["error"] == nil || rd["status"] != nil {
+		t.Errorf("radius = %v", rd)
+	}
+	// つながらなくなったときだけログを出す（2 回目は出さない）。
+	e.poller.PollOnce(t.Context())
+	if n := strings.Count(e.logs.String(), `"event_id":"DOWNSTREAM_UNREACHABLE"`); n != 1 {
+		t.Errorf("DOWNSTREAM_UNREACHABLE logged %d times", n)
+	}
+	if !strings.Contains(e.logs.String(), `"event_id":"DOWNSTREAM_REACHABLE"`) {
+		t.Error("no DOWNSTREAM_REACHABLE log")
+	}
+
+	// Valkey に届かなくても 200 で、valkey に誤りを出す。
+	e.st.pingErr = errors.New("valkey is down")
+	out = decode[map[string]any](t, e.do(http.MethodGet, "/admin/v2/status", nil, ""), 200)
+	if v := out["valkey"].(map[string]any); v["reachable"] != false || v["error"] != "valkey is down" {
+		t.Errorf("valkey = %v", v)
 	}
 }
 
-func TestStatusFailures(t *testing.T) {
-	// 下流や Valkey に接続できなくても 200 で、項目ごとに示す。
-	e := newEnv(t, true)
-	e.prov.err = errors.New("dial tcp: connection refused")
-	e.aka.avErr = &downstream.Error{Downstream: downstream.Aka, Status: 404, Problem: downstream.Problem{Cause: "CLIENT_NOT_FOUND"}}
-	e.st.pingErr = errors.New("valkey down")
-	got := decode[statusJSON](t, e.do("GET", "/admin/v1/status", nil), http.StatusOK)
-	if p := got.Downstreams.Prov; p.Reachable || p.Error == "" || p.SubscriberCount != nil {
-		t.Errorf("prov = %+v", p)
+func TestAuditLogs(t *testing.T) {
+	e := newEnv(t)
+	for i := range 3 {
+		e.do(http.MethodPut, "/admin/v2/vecgen/subscribers/44010012345678"+strconv.Itoa(i)+"/state",
+			map[string]string{"Idempotency-Key": "k" + strconv.Itoa(i), "X-Operator-Id": "alice"}, `{"state":"inactive"}`)
 	}
-	if av := got.AVClient; av.Exists == nil || *av.Exists || av.Enabled != nil {
-		t.Errorf("av client = %+v", av)
+	out := decode[auditListJSON](t, e.do(http.MethodGet, "/admin/v2/audit-logs?limit=2", nil, ""), 200)
+	if len(out.Items) != 2 || out.NextBefore == "" || out.Items[0].Target != "440100123456782" || out.Items[0].Operator != "alice" ||
+		out.Items[0].Action != "vecgen.subscriber.state" || string(out.Items[0].Detail) != `{"downstream":"vecgen","fields":["state"]}` {
+		t.Errorf("page 1 = %+v", out)
 	}
-	if got.Valkey.Reachable || got.Valkey.Error != "valkey down" || got.Operations != nil {
-		t.Errorf("valkey = %+v, operations = %+v", got.Valkey, got.Operations)
+	out = decode[auditListJSON](t, e.do(http.MethodGet, "/admin/v2/audit-logs?limit=2&before="+out.NextBefore, nil, ""), 200)
+	if len(out.Items) != 1 || out.NextBefore != "" || out.Items[0].Target != "440100123456780" {
+		t.Errorf("page 2 = %+v", out)
 	}
-
-	// aka-vecgen に接続できなければ、AVクライアントは分からない（exists を省略）。
-	e = newEnv(t, true)
-	e.aka.statusErr = errors.New("timeout")
-	got = decode[statusJSON](t, e.do("GET", "/admin/v1/status", nil), http.StatusOK)
-	if a := got.Downstreams.Aka; a.Reachable || a.Error != "timeout" || got.AVClient.Exists != nil || got.AVClient.ID != 2 {
-		t.Errorf("aka = %+v, av = %+v", a, got.AVClient)
-	}
-
-	// aka-vecgen を扱わない設定。
-	e = newEnv(t, false)
-	raw := decode[map[string]any](t, e.do("GET", "/admin/v1/status", nil), http.StatusOK)
-	if !jsonEqual(raw["downstreams"].(map[string]any)["aka"], map[string]any{"configured": false, "reachable": false}) ||
-		!jsonEqual(raw["avClient"], map[string]any{"id": 0.0}) {
-		t.Errorf("aka not configured: %v / %v", raw["downstreams"], raw["avClient"])
-	}
-}
-
-// ---- 共通の作法 ----
-
-func TestTraceID(t *testing.T) {
-	e := newEnv(t, false)
-	if w := e.do("GET", "/admin/v1/status", map[string]string{"X-Trace-ID": "trace-001"}); w.Header().Get("X-Trace-ID") != "trace-001" {
-		t.Errorf("given: %q", w.Header().Get("X-Trace-ID"))
-	}
-	generated := regexp.MustCompile(`^[0-9a-f]{32}$`)
-	for _, v := range []string{"", "has space"} {
-		if w := e.do("GET", "/admin/v1/status", map[string]string{"X-Trace-ID": v}); !generated.MatchString(w.Header().Get("X-Trace-ID")) {
-			t.Errorf("%q: %q", v, w.Header().Get("X-Trace-ID"))
+	for _, q := range []string{"limit=0", "limit=501", "before=x"} {
+		if p := problemOf(t, e.do(http.MethodGet, "/admin/v2/audit-logs?"+q, nil, ""), 400); p.Cause != causeInvalidQueryParam {
+			t.Errorf("%s: %+v", q, p)
 		}
 	}
-	// エラーの応答にも付ける。
-	if w := e.do("GET", "/admin/v1/nothing", map[string]string{"X-Trace-ID": "trace-404"}); w.Header().Get("X-Trace-ID") != "trace-404" {
-		t.Errorf("404: %q", w.Header().Get("X-Trace-ID"))
-	}
 }
 
-func TestOperator(t *testing.T) {
-	e := newEnv(t, false)
-	// 形式が違えば 400。
-	p := decode[problem](t, e.do("GET", "/admin/v1/status", map[string]string{"X-Operator-Id": "bad operator!"}), http.StatusBadRequest)
-	if p.Cause != "OPTIONAL_IE_INCORRECT" || len(p.InvalidParams) != 1 || p.InvalidParams[0].Param != "X-Operator-Id" {
-		t.Errorf("problem = %+v", p)
+func TestBodyLimit(t *testing.T) {
+	e := newEnv(t)
+	big := `{"imsis":["` + strings.Repeat("1", maxBodyBytes) + `"]}`
+	if p := problemOf(t, e.do(http.MethodPost, "/admin/v2/radius/subscribers/batch-get", nil, big), 400); p.Cause != causeInvalidMsgFormat {
+		t.Errorf("big body = %+v", p)
 	}
-	// 下流にそのまま渡す（省略された場合は渡さない）。
-	e.do("GET", "/admin/v1/status", map[string]string{"X-Operator-Id": "alice@example"})
-	e.do("GET", "/admin/v1/status", nil)
-	if ops := e.prov.statusOperators; len(ops) != 2 || ops[0] != "alice@example" || ops[1] != "" {
-		t.Errorf("operators = %q", ops)
+	if e.radius.calls() != 0 {
+		t.Error("big body reached the downstream")
 	}
-}
-
-func TestNotFoundAndMethodNotAllowed(t *testing.T) {
-	e := newEnv(t, false)
-	w := e.do("GET", "/admin/v1/nothing", nil)
-	if p := decode[problem](t, w, http.StatusNotFound); p.Cause != "" || p.Title != "Not Found" ||
-		w.Header().Get("Content-Type") != "application/problem+json" {
-		t.Errorf("404 = %+v", p)
-	}
-	w = e.do("DELETE", "/admin/v1/status", nil)
-	if p := decode[problem](t, w, http.StatusMethodNotAllowed); p.Cause != "" || w.Header().Get("Allow") != "GET, HEAD" {
-		t.Errorf("405 = %+v, Allow = %q", p, w.Header().Get("Allow"))
-	}
-}
-
-func TestRequestLog(t *testing.T) {
-	e := newEnv(t, false)
-	e.do("GET", "/admin/v1/status?x=secret", map[string]string{"X-Trace-ID": "trace-log", "X-Operator-Id": "alice"})
-	e.do("GET", "/admin/v1/status", map[string]string{"X-Trace-ID": "trace-bad", "X-Operator-Id": "bad operator!"})
-
-	entries := map[string]map[string]any{}
-	sc := bufio.NewScanner(bytes.NewReader(e.logs.Bytes()))
-	for sc.Scan() {
-		var m map[string]any
-		if err := json.Unmarshal(sc.Bytes(), &m); err == nil && m["msg"] == "request completed" {
-			entries[m["trace_id"].(string)] = m
-		}
-	}
-	if m := entries["trace-log"]; m == nil || m["method"] != "GET" || m["path"] != "/admin/v1/status" ||
-		m["http_status"] != 200.0 || m["mgmt_client"] != "bff-01" || m["operator"] != "alice" {
-		t.Errorf("log = %v", m)
-	}
-	// 形式の違う操作者 ID はそのまま記録しない。
-	if m := entries["trace-bad"]; m == nil || m["http_status"] != 400.0 || m["operator"] != "" {
-		t.Errorf("bad operator log = %v", m)
-	}
-	// クエリ文字列は出さない。
-	if bytes.Contains(e.logs.Bytes(), []byte("secret")) {
-		t.Errorf("query string is logged: %s", e.logs.Bytes())
-	}
-}
-
-func jsonEqual(a, b any) bool {
-	x, err1 := json.Marshal(a, json.Deterministic(true))
-	y, err2 := json.Marshal(b, json.Deterministic(true))
-	return err1 == nil && err2 == nil && bytes.Equal(x, y)
 }

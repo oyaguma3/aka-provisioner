@@ -2,132 +2,188 @@ package api
 
 import (
 	"context"
-	"errors"
+	"crypto/x509"
+	"encoding/json/jsontext"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
-	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
+	"github.com/oyaguma3/aka-provisioner/internal/certs"
 	"github.com/oyaguma3/aka-provisioner/internal/downstream"
-	"github.com/oyaguma3/aka-provisioner/internal/plmn"
-	"github.com/oyaguma3/aka-provisioner/internal/provapi"
-	"github.com/oyaguma3/aka-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
+// StatusSource は /status に出す、provisioner 自身の情報（設計概要 §9。段階 3-1 の U8）。
+type StatusSource struct {
+	Version   string
+	StartedAt time.Time
+	// AdminClients は管理クライアントの識別名と、ピンを読んだ時刻を返す。
+	AdminClients func() ([]string, time.Time)
+	// DownstreamsLoadedAt は下流の登録簿を読んだ時刻を返す。
+	DownstreamsLoadedAt func() time.Time
+	// ClientCertificate は下流に提示するクライアント証明書を返す。
+	ClientCertificate func() *x509.Certificate
+	// ServerCertificate は API のサーバー証明書を返す。
+	ServerCertificate func() *x509.Certificate
+	// Poller は下流の状態を集める。
+	Poller *Poller
+}
+
+// statusValkeyTimeout は /status で Valkey に PING するときの上限。
+const statusValkeyTimeout = 2 * time.Second
+
 type statusJSON struct {
-	Version     string               `json:"version"`
-	StartedAt   time.Time            `json:"startedAt"`
-	PLMNMap     []plmnEntryJSON      `json:"plmnMap"`
-	Downstreams downstreamsJSON      `json:"downstreams"`
-	AVClient    avClientStatusJSON   `json:"avClient"`
-	Valkey      valkeyStatusJSON     `json:"valkey"`
-	Operations  *operationCountsJSON `json:"operations,omitempty"`
+	Version              string           `json:"version"`
+	StartedAt            time.Time        `json:"startedAt"`
+	Valkey               valkeyJSON       `json:"valkey"`
+	AdminClients         []string         `json:"adminClients"`
+	AdminClientsLoadedAt time.Time        `json:"adminClientsLoadedAt"`
+	DownstreamsLoadedAt  time.Time        `json:"downstreamsLoadedAt"`
+	ClientCertificate    certJSON         `json:"clientCertificate"`
+	ServerCertificate    certJSON         `json:"serverCertificate"`
+	Downstreams          []downstreamJSON `json:"downstreams"`
 }
 
-type plmnEntryJSON struct {
-	PLMN     string        `json:"plmn"`
-	KeyStore plmn.KeyStore `json:"keyStore"`
-}
-
-type downstreamsJSON struct {
-	Prov downstreamStatusJSON `json:"prov"`
-	Aka  downstreamStatusJSON `json:"aka"`
-}
-
-type downstreamStatusJSON struct {
-	Configured      bool   `json:"configured"`
-	URL             string `json:"url,omitempty"`
-	Reachable       bool   `json:"reachable"`
-	Version         string `json:"version,omitempty"`
-	NodeName        string `json:"nodeName,omitempty"`
-	SubscriberCount *int64 `json:"subscriberCount,omitempty"`
-	Error           string `json:"error,omitempty"`
-	Hint            string `json:"hint,omitempty"`
-}
-
-type avClientStatusJSON struct {
-	ID int64 `json:"id"`
-	// Exists と Enabled は、aka-vecgen に問い合わせられなかった場合は省略する。
-	Exists  *bool  `json:"exists,omitempty"`
-	Enabled *bool  `json:"enabled,omitempty"`
-	Name    string `json:"name,omitempty"`
-}
-
-type valkeyStatusJSON struct {
+type valkeyJSON struct {
 	Reachable bool   `json:"reachable"`
 	Error     string `json:"error,omitempty"`
 }
 
-type operationCountsJSON struct {
-	Running  int `json:"running"`
-	Retrying int `json:"retrying"`
-	Failed   int `json:"failed"`
+type certJSON struct {
+	Subject     string    `json:"subject"`
+	NotAfter    time.Time `json:"notAfter"`
+	Fingerprint string    `json:"fingerprint"`
 }
 
-// getStatus は provisioner と下流の状態を返す。下流や Valkey に接続できなくても 200 を返し、項目ごとに示す。
-func (h *Handler) getStatus(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), h.DownstreamTimeout)
-	defer cancel()
-
-	out := statusJSON{Version: h.Version, StartedAt: h.StartedAt, PLMNMap: []plmnEntryJSON{}}
-	for _, e := range h.PLMNMap.Entries() {
-		out.PLMNMap = append(out.PLMNMap, plmnEntryJSON{PLMN: e.PLMN, KeyStore: e.KeyStore})
+func certInfo(c *x509.Certificate) certJSON {
+	if c == nil {
+		return certJSON{}
 	}
+	return certJSON{Subject: c.Subject.String(), NotAfter: c.NotAfter, Fingerprint: certs.Fingerprint(c)}
+}
 
-	var wg sync.WaitGroup
-	wg.Go(func() { out.Downstreams.Prov = h.provStatus(ctx) })
-	wg.Go(func() { out.Downstreams.Aka, out.AVClient = h.akaStatus(ctx) })
-	wg.Go(func() {
-		if err := h.Store.Ping(ctx); err != nil {
-			out.Valkey.Error = err.Error()
-			return
-		}
+// downstreamJSON は下流ごとの状態。Status は下流の /status の本文を解釈せずにそのまま入れる（U8）。
+type downstreamJSON struct {
+	Name              string         `json:"name"`
+	URL               string         `json:"url"`
+	ServerCertificate certJSON       `json:"serverCertificate"`
+	Reachable         bool           `json:"reachable"`
+	CheckedAt         time.Time      `json:"checkedAt,omitzero"`
+	Error             string         `json:"error,omitempty"`
+	Hint              string         `json:"hint,omitempty"`
+	Status            jsontext.Value `json:"status,omitempty"`
+}
+
+// getStatus は GET /status。下流の状態は Poller が集めたものを返し、要求のたびには下流を呼ばない
+// （監視が頻繁に呼んでも下流に負荷をかけない。設計概要 §9）。
+func (h *Handler) getStatus(w http.ResponseWriter, r *http.Request) {
+	s := h.Status
+	out := statusJSON{Version: s.Version, StartedAt: s.StartedAt, Downstreams: []downstreamJSON{}}
+	ctx, cancel := context.WithTimeout(r.Context(), statusValkeyTimeout)
+	defer cancel()
+	if err := h.Store.Ping(ctx); err != nil {
+		out.Valkey.Error = err.Error()
+	} else {
 		out.Valkey.Reachable = true
-		counts, err := h.Subscribers.OperationCounts(ctx)
-		if err != nil {
-			h.Log.ErrorContext(ctx, "count operations", "error", err)
-			return
+	}
+	out.AdminClients, out.AdminClientsLoadedAt = s.AdminClients()
+	if out.AdminClients == nil {
+		out.AdminClients = []string{}
+	}
+	out.DownstreamsLoadedAt = s.DownstreamsLoadedAt()
+	out.ClientCertificate = certInfo(s.ClientCertificate())
+	out.ServerCertificate = certInfo(s.ServerCertificate())
+	for _, name := range downstream.Names {
+		c := h.Downstream(name)
+		d := downstreamJSON{Name: string(name), URL: c.BaseURL(), ServerCertificate: certInfo(c.ServerCertificate())}
+		if res, ok := s.Poller.result(name); ok {
+			d.Reachable, d.CheckedAt, d.Error, d.Hint, d.Status = res.reachable, res.checkedAt, res.err, res.hint, res.body
 		}
-		out.Operations = &operationCountsJSON{Running: counts[store.OpRunning], Retrying: counts[store.OpRetrying], Failed: counts[store.OpFailed]}
-	})
-	wg.Wait()
+		out.Downstreams = append(out.Downstreams, d)
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (h *Handler) provStatus(ctx context.Context) downstreamStatusJSON {
-	st := downstreamStatusJSON{Configured: true, URL: h.Prov.BaseURL()}
-	s, err := h.Prov.Status(ctx)
-	if err != nil {
-		st.Error, st.Hint = err.Error(), provapi.Diagnose(err)
-		h.Log.WarnContext(ctx, "provisioning-api is not available", "error", err, "hint", st.Hint)
-		return st
-	}
-	st.Reachable, st.Version, st.NodeName, st.SubscriberCount = true, s.Version, s.NodeName, &s.SubscriberCount
-	return st
+// Poller は下流の /status を定期に集めて覚えておく（設計概要 §9）。
+type Poller struct {
+	Downstream func(downstream.Name) Relayer
+	Log        *slog.Logger
+
+	mu      sync.Mutex
+	results map[downstream.Name]pollResult
 }
 
-func (h *Handler) akaStatus(ctx context.Context) (downstreamStatusJSON, avClientStatusJSON) {
-	av := avClientStatusJSON{ID: h.AkaAVClientID}
-	if h.Aka == nil {
-		return downstreamStatusJSON{}, av
-	}
-	st := downstreamStatusJSON{Configured: true, URL: h.Aka.BaseURL()}
-	s, err := h.Aka.Status(ctx)
-	if err != nil {
-		st.Error, st.Hint = err.Error(), akaapi.Diagnose(err)
-		h.Log.WarnContext(ctx, "aka-vecgen is not available", "error", err, "hint", st.Hint)
-		return st, av
-	}
-	st.Reachable, st.Version, st.SubscriberCount = true, s.Version, &s.SubscriberCount
+type pollResult struct {
+	checkedAt time.Time
+	reachable bool
+	err       string
+	hint      string
+	body      jsontext.Value
+}
 
-	c, err := h.Aka.GetAVClient(ctx, h.AkaAVClientID)
-	switch apiErr, ok := errors.AsType[*downstream.Error](err); {
-	case err == nil:
-		av.Exists, av.Enabled, av.Name = new(true), new(c.Enabled), c.Name
-	case ok && apiErr.Status == http.StatusNotFound && apiErr.Problem.Cause == akaapi.CauseClientNotFound:
-		av.Exists = new(false)
-	default:
-		h.Log.WarnContext(ctx, "get av client", "av_client_id", h.AkaAVClientID, "error", err)
+// Run は ctx が終わるまで、すぐに 1 回と、interval ごとに下流の状態を集める。
+func (p *Poller) Run(ctx context.Context, interval time.Duration) {
+	p.PollOnce(ctx)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.PollOnce(ctx)
+		}
 	}
-	return st, av
+}
+
+// PollOnce は全下流の /status を並べて 1 回ずつ呼ぶ。つながらなくなったとき（DOWNSTREAM_UNREACHABLE）と、
+// またつながったとき（DOWNSTREAM_REACHABLE）にログを出す（30 秒ごとに同じログを出さない）。
+func (p *Poller) PollOnce(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, name := range downstream.Names {
+		wg.Go(func() { p.poll(ctx, name) })
+	}
+	wg.Wait()
+}
+
+func (p *Poller) poll(ctx context.Context, name downstream.Name) {
+	traceID := trace.New()
+	res := pollResult{checkedAt: time.Now().UTC()}
+	resp, err := p.Downstream(name).Relay(trace.With(ctx, traceID), downstream.RelayRequest{Method: http.MethodGet, Path: []string{"status"}})
+	switch {
+	case err != nil:
+		res.err, res.hint = err.Error(), downstream.Diagnose(name, err)
+	case resp.Status != http.StatusOK:
+		res.err = "status " + strconv.Itoa(resp.Status)
+	default:
+		res.reachable = true
+		if v := jsontext.Value(resp.Body); v.IsValid() {
+			res.body = v
+		}
+	}
+
+	p.mu.Lock()
+	prev, seen := p.results[name]
+	if p.results == nil {
+		p.results = map[downstream.Name]pollResult{}
+	}
+	p.results[name] = res
+	p.mu.Unlock()
+
+	switch {
+	case !res.reachable && (!seen || prev.reachable):
+		p.Log.Warn("downstream is not available", "event_id", "DOWNSTREAM_UNREACHABLE", "trace_id", traceID,
+			"downstream", string(name), "error", res.err, "hint", res.hint)
+	case res.reachable && (!seen || !prev.reachable):
+		p.Log.Info("downstream is available", "event_id", "DOWNSTREAM_REACHABLE", "trace_id", traceID, "downstream", string(name))
+	}
+}
+
+func (p *Poller) result(name downstream.Name) (pollResult, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r, ok := p.results[name]
+	return r, ok
 }

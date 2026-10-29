@@ -1,5 +1,5 @@
 // Package certs は provisioner の API のサーバー証明書と、下流に提示するクライアント証明書を扱う。
-// 自己署名証明書の生成と、ファイルからの読み込み（更新されたら読み直す）を行う。
+// 自己署名証明書の生成と、ファイルからの読み込み（SIGHUP で読み直す）を行う。
 package certs
 
 import (
@@ -28,8 +28,6 @@ import (
 const (
 	// selfSignedValidFor は自動生成する自己署名サーバー証明書の有効期間。
 	selfSignedValidFor = 10 * 365 * 24 * time.Hour
-	// checkInterval は証明書ファイルの更新を確かめる間隔。
-	checkInterval = time.Minute
 )
 
 // Fingerprint は証明書（DER）の SHA-256 を 16進小文字で返す。
@@ -158,84 +156,54 @@ func writeNew(path string, data []byte, perm fs.FileMode) error {
 	return nil
 }
 
-// File はファイルから読み込んだサーバー証明書。
-// 持ち込みの証明書（tailscale cert などで定期的に更新されるもの）に対応するため、
-// ファイルの内容が変わっていたら読み直す。読み直しに失敗したら、それまでの証明書を使い続ける。
+// File はファイルから読み込んだサーバー証明書。SIGHUP で読み直す（Reload。設計概要 §8.1）。
+// 読み直しに失敗したら、それまでの証明書を使い続ける。
 type File struct {
 	certPath, keyPath string
 	log               *slog.Logger
 
+	mu   sync.Mutex // Reload を 1 つずつにする
 	cert atomic.Pointer[tls.Certificate]
-
-	mu        sync.Mutex
-	checkedAt time.Time
-	// sum は読み込んだ証明書と秘密鍵の内容のハッシュ。更新時刻は粒度が粗く、
-	// 短時間の書き換えを見逃すことがあるので、内容で比べる。
-	sum [sha256.Size]byte
 }
 
 // LoadFile は証明書と秘密鍵のファイルを読み込む。
 func LoadFile(certPath, keyPath string, log *slog.Logger) (*File, error) {
 	f := &File{certPath: certPath, keyPath: keyPath, log: log}
-	cert, sum, err := f.load()
+	cert, err := f.load()
 	if err != nil {
 		return nil, err
 	}
 	f.cert.Store(cert)
-	f.sum = sum
-	f.checkedAt = time.Now()
 	return f, nil
 }
 
-// Leaf は現在の証明書を返す。
+// Leaf は今の証明書を返す。
 func (f *File) Leaf() *x509.Certificate { return f.cert.Load().Leaf }
 
-// GetCertificate は tls.Config.GetCertificate に渡す。
+// GetCertificate は tls.Config.GetCertificate に使う。読み直した証明書を次の接続から出す。
 func (f *File) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	f.mu.Lock()
-	if time.Since(f.checkedAt) >= checkInterval {
-		f.checkedAt = time.Now()
-		f.reloadIfChanged()
-	}
-	f.mu.Unlock()
 	return f.cert.Load(), nil
 }
 
-// reloadIfChanged はファイルの内容が変わっていたら読み直す。f.mu を保持して呼ぶ。
-func (f *File) reloadIfChanged() {
-	cert, sum, err := f.load()
+// Reload は証明書と秘密鍵のファイルを読み直す。読めない・組が合わないときは前の証明書のまま続け、エラーを返す。
+func (f *File) Reload() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cert, err := f.load()
 	if err != nil {
-		// 証明書と秘密鍵の片方だけが書き換わった途中の可能性がある。次の確認で再試行する。
-		f.log.Warn("server certificate reload failed; keeping the current one", "error", err)
-		return
-	}
-	if sum == f.sum {
-		return
+		return err
 	}
 	f.cert.Store(cert)
-	f.sum = sum
-	f.log.Info("reloaded server certificate",
-		"fingerprint", Fingerprint(cert.Leaf), "not_after", cert.Leaf.NotAfter)
+	return nil
 }
 
-func (f *File) load() (*tls.Certificate, [sha256.Size]byte, error) {
-	certPEM, err := os.ReadFile(f.certPath)
+func (f *File) load() (*tls.Certificate, error) {
+	cert, err := tls.LoadX509KeyPair(f.certPath, f.keyPath)
 	if err != nil {
-		return nil, [sha256.Size]byte{}, err
-	}
-	keyPEM, err := os.ReadFile(f.keyPath)
-	if err != nil {
-		return nil, [sha256.Size]byte{}, err
-	}
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return nil, [sha256.Size]byte{}, fmt.Errorf("load server certificate: %w", err)
+		return nil, fmt.Errorf("load server certificate: %w", err)
 	}
 	if time.Now().After(cert.Leaf.NotAfter) {
 		f.log.Warn("server certificate has expired", "not_after", cert.Leaf.NotAfter)
 	}
-	h := sha256.New()
-	h.Write(certPEM)
-	h.Write(keyPEM)
-	return &cert, [sha256.Size]byte(h.Sum(nil)), nil
+	return &cert, nil
 }

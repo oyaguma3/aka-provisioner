@@ -12,18 +12,17 @@ import (
 	"time"
 
 	"github.com/oyaguma3/aka-provisioner/internal/store"
+	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
 const (
-	// maxBodyBytes は要求の本文の上限（下流と同じ）。
-	maxBodyBytes = 256 << 10
-	// LockTTL は IMSI ごとのロックの有効期限。1 つの操作にかかる最大の時間より長くする（設計概要 §9.1）。
-	// 加入者の統合操作（internal/subscriber）も同じ値を使う。
-	LockTTL = 60 * time.Second
-	// idempotencyTTL は、Idempotency-Key の要求の応答を覚えておく時間（設計概要 §9.2）。
+	// maxBodyBytes は要求の本文の上限（一括取得の 500 件の要求を通せるように。設計概要 §6.3）。
+	maxBodyBytes = 1 << 20
+	// idempotencyTTL は、Idempotency-Key の要求の応答を覚えておく時間（設計概要 §7）。
 	idempotencyTTL = 24 * time.Hour
-	// idempotencyPendingTTL は、処理中の記録の有効期限。プロセスが落ちても、この時間が過ぎれば同じキーでやり直せる。
-	idempotencyPendingTTL = LockTTL
+	// idempotencyPendingTTL は、処理中の記録の有効期限。下流の呼び出しのタイムアウトの上限（30 秒）より長くする。
+	// プロセスが落ちても、この時間が過ぎれば同じキーでやり直せる。
+	idempotencyPendingTTL = 60 * time.Second
 
 	idempotencyKeyHeader     = "Idempotency-Key"
 	idempotentReplayedHeader = "Idempotent-Replayed"
@@ -48,26 +47,14 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, *problem) {
 	return b, nil
 }
 
-// idempotencyControl は、処理中のハンドラーが「この応答は覚えない」と伝えるためのもの。
-type idempotencyControl struct{ noStore bool }
-
-type idempotencyControlKey struct{}
-
-// doNotRemember は、この応答を Idempotency-Key で覚えないようにする（同じ IMSI の操作が処理中、のような一時的な応答）。
-func doNotRemember(r *http.Request) {
-	if c, ok := r.Context().Value(idempotencyControlKey{}).(*idempotencyControl); ok {
-		c.noStore = true
-	}
-}
-
-// idempotent は書き込みの要求の Idempotency-Key を扱う（設計概要 §9.2）。
+// idempotent は下流を書き換える要求の Idempotency-Key を扱う（設計概要 §7）。キーは必須で、なければ 400。
 // 同じ管理クライアントから同じキーで届いた要求には、最初の応答をそのまま返し、ハンドラーは呼ばない。
 // 応答を覚えるのは 4xx までで、5xx（下流に接続できない等）は覚えずに、同じキーでやり直せるようにする。
 func (h *Handler) idempotent(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get(idempotencyKeyHeader)
 		if key == "" {
-			next(w, r)
+			badParams(causeMandatoryIEMissing, invalidParam{idempotencyKeyHeader, "is required for a request that changes a downstream"}).write(w)
 			return
 		}
 		if !idempotencyKeyPattern.MatchString(key) {
@@ -104,19 +91,20 @@ func (h *Handler) idempotent(next http.HandlerFunc) http.HandlerFunc {
 				w.Header().Set("Location", stored.Location)
 			}
 			w.Header().Set(idempotentReplayedHeader, "true")
+			h.Log.InfoContext(r.Context(), "replayed the stored response", "event_id", "IDEMPOTENT_REPLAYED",
+				"trace_id", trace.From(r.Context()), "mgmt_client", mgmtClient, "method", r.Method, "path", r.URL.Path, "status", stored.Status)
 			w.WriteHeader(stored.Status)
 			w.Write(stored.Body)
 			return
 		}
 
-		ctrl := &idempotencyControl{}
 		rec := &captureWriter{ResponseWriter: w, status: http.StatusOK}
-		next(rec, r.WithContext(context.WithValue(r.Context(), idempotencyControlKey{}, ctrl)))
+		next(rec, r)
 
 		// 要求が途中で切れても、記録は残す。
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), storeTimeout)
 		defer cancel()
-		if rec.status >= 500 || ctrl.noStore {
+		if rec.status >= 500 {
 			err = h.Store.AbandonIdempotent(ctx, mgmtClient, key, hash)
 		} else {
 			err = h.Store.CompleteIdempotent(ctx, mgmtClient, key, hash, store.StoredResponse{
@@ -163,25 +151,3 @@ func (c *captureWriter) Write(b []byte) (int, error) {
 
 // Unwrap は http.ResponseController が元の ResponseWriter を使えるようにする。
 func (c *captureWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
-
-// lockIMSI は IMSI のロックを取る。取れなければ応答を書いて false を返す（同じ IMSI の操作が処理中なら 409）。
-// 取れたら、解放する関数を返す。
-func (h *Handler) lockIMSI(w http.ResponseWriter, r *http.Request, imsi string) (unlock func(), ok bool) {
-	token, err := h.Store.AcquireIMSILock(r.Context(), imsi, LockTTL)
-	switch {
-	case errors.Is(err, store.ErrLocked):
-		doNotRemember(r)
-		newProblem(http.StatusConflict, causeOperationInProgress, "another operation on the same IMSI is in progress").write(w)
-		return nil, false
-	case err != nil:
-		h.internalError(w, r, err)
-		return nil, false
-	}
-	return func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), storeTimeout)
-		defer cancel()
-		if err := h.Store.ReleaseIMSILock(ctx, imsi, token); err != nil {
-			h.Log.ErrorContext(ctx, "release imsi lock", "imsi", imsi, "error", err)
-		}
-	}, true
-}

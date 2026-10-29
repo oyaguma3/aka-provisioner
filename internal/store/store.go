@@ -1,6 +1,5 @@
 // Package store は provisioner 専用の Valkey を扱う。
-// 用途は操作の記録・IMSI ごとのロック・Idempotency-Key・監査ログに限る（加入者のデータは持たない）。
-// キー設計は docs/design-overview.md §8 を参照。
+// 用途は Idempotency-Key の記録と監査ログの Stream に限る（加入者のデータは持たない。設計概要 §7・§10）。
 package store
 
 import (

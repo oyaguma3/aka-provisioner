@@ -9,63 +9,56 @@ import (
 	"syscall"
 )
 
-// Hints は、下流に接続できなかったときに示す対処の文。下流ごとに設定の名前や手順が違うので、
-// internal/provapi と internal/akaapi で用意する。
-type Hints struct {
-	// HostnameMismatch は、下流のサーバー証明書の SAN に接続先が入っていないとき。
-	HostnameMismatch string
-	// UnknownServer は、下流のサーバー証明書が設定した証明書と一致しないとき。
-	UnknownServer string
-	// ServerCertInvalid は、下流のサーバー証明書が有効期間外のとき。
-	ServerCertInvalid string
-	// ClientRejected は、下流が provisioner のクライアント証明書を受け付けなかったとき。
-	ClientRejected string
-	// ConnectionReset は、下流が接続を切ったとき（クライアント証明書の不受理の可能性がある）。
-	ConnectionReset string
-	// NameNotFound は、下流のホスト名を解決できないとき。%s にホスト名が入る。
-	NameNotFound string
-	// DialFailed は、下流に接続できないとき。
-	DialFailed string
-	// Timeout は、下流から時間内に応答がないとき。
-	Timeout string
+// hints は、下流に接続できなかったときに示す対処の文。%[1]s に下流の名前が入る。
+var hints = struct {
+	hostnameMismatch, unknownServer, serverCertInvalid, clientRejected, connectionReset, nameNotFound, dialFailed, timeout string
+}{
+	hostnameMismatch:  "%[1]s のサーバー証明書の SAN に、登録簿の url のホスト名か IP アドレスが入っていません。",
+	unknownServer:     "%[1]s のサーバー証明書が、登録簿の serverCert と一致しません（%[1]s が証明書を作り直したら、登録簿の証明書も差し替えて SIGHUP を送ってください）。",
+	serverCertInvalid: "%[1]s のサーバー証明書が有効期間外です。",
+	clientRejected:    "%[1]s が provisioner のクライアント証明書を受け付けませんでした。%[1]s の管理クライアントのピンのファイルに、provisioner のクライアント証明書のフィンガープリントがあるか確かめてください。",
+	connectionReset:   "%[1]s が接続を切りました。%[1]s の管理クライアントのピンのファイルに、provisioner のクライアント証明書のフィンガープリントがあるか確かめてください。",
+	nameNotFound:      "%[1]s のホスト名 %[2]s を解決できません（同じホストの構成では、%[1]s が動いているか、共有のネットワークに入っているか確かめてください）。",
+	dialFailed:        "%[1]s に接続できません。%[1]s が動いているか、登録簿の url のアドレスとポート、ファイアウォールを確かめてください。",
+	timeout:           "%[1]s から時間内に応答がありません（PROVISIONER_DOWNSTREAM_TIMEOUT）。",
 }
 
 // Diagnose は、下流に接続できなかったときの原因の見当を、運用者向けの文で返す。
 // 見当がつかなければ空文字列を返す。
-func Diagnose(err error, h Hints) string {
+func Diagnose(name Name, err error) string {
 	if err == nil {
 		return ""
 	}
 	if _, ok := errors.AsType[x509.HostnameError](err); ok {
-		return h.HostnameMismatch
+		return fmt.Sprintf(hints.hostnameMismatch, name)
 	}
 	if _, ok := errors.AsType[x509.UnknownAuthorityError](err); ok {
-		return h.UnknownServer
+		return fmt.Sprintf(hints.unknownServer, name)
 	}
 	if _, ok := errors.AsType[x509.CertificateInvalidError](err); ok {
-		return h.ServerCertInvalid
+		return fmt.Sprintf(hints.serverCertInvalid, name)
 	}
 	// 相手から TLS のアラートを受け取ると、Op が "remote error" の *net.OpError になる。
 	// 下流は未登録・有効期間外・証明書なしの接続を bad_certificate 等で拒否する。
 	if opErr, ok := errors.AsType[*net.OpError](err); ok && opErr.Op == "remote error" &&
 		(strings.Contains(opErr.Err.Error(), "bad certificate") || strings.Contains(opErr.Err.Error(), "certificate required")) {
-		return h.ClientRejected
+		return fmt.Sprintf(hints.clientRejected, name)
 	}
 	// TLS 1.3 では、下流がクライアント証明書を検証して拒否する前に、provisioner はハンドシェイクを終えて
 	// リクエストを送っている。下流が読まずに接続を閉じると、拒否のアラートより先に接続のリセットが届き、
-	// アラートを受け取れないことがある（web-gui-for-eapaka-radius の手元の確認で 16 回に 1 回ほど）。
+	// アラートを受け取れないことがある（手元の確認で 16 回に 1 回ほど）。
 	if errors.Is(err, syscall.ECONNRESET) {
-		return h.ConnectionReset
+		return fmt.Sprintf(hints.connectionReset, name)
 	}
 	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok && dnsErr.IsNotFound {
 		// 同一ホストの構成では、下流のコンテナが止まっているときも名前を解決できなくなる。
-		return fmt.Sprintf(h.NameNotFound, dnsErr.Name)
+		return fmt.Sprintf(hints.nameNotFound, name, dnsErr.Name)
 	}
 	if opErr, ok := errors.AsType[*net.OpError](err); ok && opErr.Op == "dial" {
-		return h.DialFailed
+		return fmt.Sprintf(hints.dialFailed, name)
 	}
 	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
-		return h.Timeout
+		return fmt.Sprintf(hints.timeout, name)
 	}
 	return ""
 }

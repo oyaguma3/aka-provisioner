@@ -100,9 +100,8 @@ func TestFileReload(t *testing.T) {
 	old := Fingerprint(f.Leaf())
 
 	// 変更がなければそのまま。
-	f.reloadIfChanged()
-	if Fingerprint(f.Leaf()) != old {
-		t.Fatal("reloaded without change")
+	if err := f.Reload(); err != nil || Fingerprint(f.Leaf()) != old {
+		t.Fatalf("reload without change: %v", err)
 	}
 
 	// 秘密鍵が対応しない途中の状態では、それまでの証明書を使い続ける。
@@ -113,32 +112,33 @@ func TestFileReload(t *testing.T) {
 	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f.reloadIfChanged()
-	if Fingerprint(f.Leaf()) != old {
-		t.Fatal("mismatched pair must not be loaded")
+	if err := f.Reload(); err == nil || Fingerprint(f.Leaf()) != old {
+		t.Fatalf("mismatched pair must not be loaded: %v", err)
 	}
 
 	// 両方そろえば読み直す。
 	writePair(t, certPath, keyPath, "new.example")
-	f.reloadIfChanged()
+	if err := f.Reload(); err != nil {
+		t.Fatal(err)
+	}
 	if got := f.Leaf().DNSNames; !slices.Equal(got, []string{"new.example"}) {
 		t.Errorf("after reload DNSNames = %v", got)
 	}
 
-	// GetCertificate は確認間隔が過ぎるまでファイルを見ない。
+	// GetCertificate は Reload するまでファイルを見ない（SIGHUP で読み直す）。
 	writePair(t, certPath, keyPath, "newer.example")
 	cert, err := f.GetCertificate(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(cert.Leaf.DNSNames, []string{"new.example"}) {
-		t.Errorf("GetCertificate before interval: DNSNames = %v", cert.Leaf.DNSNames)
+		t.Errorf("GetCertificate before reload: DNSNames = %v", cert.Leaf.DNSNames)
 	}
-	f.mu.Lock()
-	f.checkedAt = time.Now().Add(-checkInterval)
-	f.mu.Unlock()
+	if err := f.Reload(); err != nil {
+		t.Fatal(err)
+	}
 	if cert, _ = f.GetCertificate(nil); !slices.Equal(cert.Leaf.DNSNames, []string{"newer.example"}) {
-		t.Errorf("GetCertificate after interval: DNSNames = %v", cert.Leaf.DNSNames)
+		t.Errorf("GetCertificate after reload: DNSNames = %v", cert.Leaf.DNSNames)
 	}
 }
 

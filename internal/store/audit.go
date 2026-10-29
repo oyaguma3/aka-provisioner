@@ -8,47 +8,44 @@ import (
 	"time"
 )
 
+// keyAudit は監査ログの Stream（aka-vecgen・aka-radius と同じ名前と項目）。
 const keyAudit = "audit"
 
-// AuditEntry は provisioner の監査ログの 1 件（docs/openapi/provisioner-api.yaml の AuditLogEntry）。
+// AuditEntry は監査ログの 1 件（設計概要 §10）。
 type AuditEntry struct {
-	ID          string    // エントリID。記録時は空
-	Time        time.Time // 記録日時。エントリID から求める
-	Operator    string    // 操作者（X-Operator-Id）
-	MgmtClient  string    // 管理クライアントの識別名
-	Action      string    // 操作（subscriber.create 等）
-	Target      string    // 対象（IMSI、ID 等）
-	TraceID     string    // トレースID
-	OperationID string    // 操作の記録の ID（ない場合は空）
-	Result      string    // 結果（completed 等）
-	Details     string    // 変更内容の JSON（ない場合は空）
+	ID         string    // エントリID。記録時は空
+	Time       time.Time // 記録日時。エントリID から求める
+	Operator   string    // 操作者（X-Operator-Id）
+	MgmtClient string    // 管理クライアントの識別名
+	Action     string    // 操作（vecgen.subscriber.create 等）
+	Target     string    // 対象（IMSI）
+	Detail     string    // 変更の内容の JSON（下流の名前と項目の名前。値は残さない）
+	TraceID    string    // トレースID
 }
 
-// AppendAudit は監査ログを追記する。件数が maxLen を超えた分は古いものから捨てる（おおよその上限）。
-func (s *Store) AppendAudit(ctx context.Context, e AuditEntry, maxLen int64) error {
+// AppendAudit は監査ログを Stream に追加し、エントリID を返す。件数は maxLen 程度に保つ（MAXLEN ~）。
+func (s *Store) AppendAudit(ctx context.Context, e AuditEntry, maxLen int64) (string, error) {
 	cmd := s.c.B().Xadd().Key(keyAudit).Maxlen().Almost().Threshold(strconv.FormatInt(maxLen, 10)).Id("*").FieldValue().
 		FieldValue("operator", e.Operator).
 		FieldValue("mgmt_client", e.MgmtClient).
 		FieldValue("action", e.Action).
 		FieldValue("target", e.Target).
-		FieldValue("trace_id", e.TraceID).
-		FieldValue("operation_id", e.OperationID).
-		FieldValue("result", e.Result).
-		FieldValue("details", e.Details).Build()
-	if err := s.c.Do(ctx, cmd).Error(); err != nil {
-		return fmt.Errorf("append audit: %w", err)
+		FieldValue("detail", e.Detail).
+		FieldValue("trace_id", e.TraceID).Build()
+	id, err := s.c.Do(ctx, cmd).ToString()
+	if err != nil {
+		return "", fmt.Errorf("append audit: %w", err)
 	}
-	return nil
+	return id, nil
 }
 
-// ListAudit は監査ログを新しい順に返す。before が空でなければ、そのエントリID より古いものを返す。
-// さらに古いエントリがあれば、次の before に渡す値を返す。
+// ListAudit は監査ログを新しい順に返す。before を指定すると、そのエントリより古いものだけを返す。
+// 続きがあれば nextBefore に次の before を返す。
 func (s *Store) ListAudit(ctx context.Context, before string, limit int) (entries []AuditEntry, nextBefore string, err error) {
 	end := "+"
 	if before != "" {
 		end = "(" + before
 	}
-	// 続きがあるかを知るために 1 件多く読む。
 	res, err := s.c.Do(ctx, s.c.B().Xrevrange().Key(keyAudit).End(end).Start("-").Count(int64(limit)+1).Build()).AsXRange()
 	if err != nil {
 		return nil, "", fmt.Errorf("list audit: %w", err)
@@ -63,7 +60,7 @@ func (s *Store) ListAudit(ctx context.Context, before string, limit int) (entrie
 		entries[i] = AuditEntry{
 			ID: r.ID, Time: auditTime(r.ID),
 			Operator: f["operator"], MgmtClient: f["mgmt_client"], Action: f["action"], Target: f["target"],
-			TraceID: f["trace_id"], OperationID: f["operation_id"], Result: f["result"], Details: f["details"],
+			Detail: f["detail"], TraceID: f["trace_id"],
 		}
 	}
 	return entries, nextBefore, nil

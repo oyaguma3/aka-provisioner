@@ -5,26 +5,19 @@ import (
 	"net/http"
 )
 
-// ProblemDetails の cause の値（docs/openapi/provisioner-api.yaml の ProblemDetails）。
+// ProblemDetails の cause（設計概要 §6.3・§7）。下流の誤りは、下流の cause のままそのまま返す。
 const (
-	causeInvalidMsgFormat        = "INVALID_MSG_FORMAT"
-	causeInvalidQueryParam       = "INVALID_QUERY_PARAM"
-	causeMandatoryIEMissing      = "MANDATORY_IE_MISSING"
-	causeMandatoryIEIncorrect    = "MANDATORY_IE_INCORRECT"
-	causeOptionalIEIncorrect     = "OPTIONAL_IE_INCORRECT"
-	causeSystemFailure           = "SYSTEM_FAILURE"
-	causeUserNotFound            = "USER_NOT_FOUND"
-	causeSubscriberExists        = "SUBSCRIBER_ALREADY_EXISTS"
-	causeKeyStoreMismatch        = "KEY_STORE_MISMATCH"
-	causeOperationIncomplete     = "OPERATION_INCOMPLETE"
-	causeOperationNotFound       = "OPERATION_NOT_FOUND"
-	causeOperationStateConflict  = "OPERATION_STATE_CONFLICT"
-	causeOperationInProgress     = "OPERATION_IN_PROGRESS"
-	causeOperationUnresolved     = "OPERATION_UNRESOLVED"
-	causeIdempotencyKeyMismatch  = "IDEMPOTENCY_KEY_MISMATCH"
-	causeDownstreamError         = "DOWNSTREAM_ERROR"
-	causeDownstreamUnavailable   = "DOWNSTREAM_UNAVAILABLE"
-	causeDownstreamNotConfigured = "DOWNSTREAM_NOT_CONFIGURED"
+	causeInvalidMsgFormat       = "INVALID_MSG_FORMAT"
+	causeInvalidQueryParam      = "INVALID_QUERY_PARAM"
+	causeMandatoryIEMissing     = "MANDATORY_IE_MISSING"
+	causeMandatoryIEIncorrect   = "MANDATORY_IE_INCORRECT"
+	causeOptionalIEIncorrect    = "OPTIONAL_IE_INCORRECT"
+	causeSystemFailure          = "SYSTEM_FAILURE"
+	causeRouteNotAllowed        = "ROUTE_NOT_ALLOWED"
+	causeOperationInProgress    = "OPERATION_IN_PROGRESS"
+	causeIdempotencyKeyMismatch = "IDEMPOTENCY_KEY_MISMATCH"
+	causeDownstreamError        = "DOWNSTREAM_ERROR"
+	causeDownstreamUnavailable  = "DOWNSTREAM_UNAVAILABLE"
 )
 
 type invalidParam struct {
@@ -32,7 +25,7 @@ type invalidParam struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// problem はエラー応答（ProblemDetails）。下流の作法の項目に、provisioner の拡張項目を加える。
+// problem は RFC 9457 の ProblemDetails。
 type problem struct {
 	Title         string         `json:"title"`
 	Status        int            `json:"status"`
@@ -40,19 +33,10 @@ type problem struct {
 	Cause         string         `json:"cause,omitempty"`
 	InvalidParams []invalidParam `json:"invalidParams,omitempty"`
 
-	// Downstream はエラーの元の下流（prov / aka）。
+	// Downstream は誤りの起きた下流（vecgen / radius）。provisioner 自身の誤りでは空。
 	Downstream string `json:"downstream,omitempty"`
-	// DownstreamStatus は下流の HTTP ステータス。
+	// DownstreamStatus は、下流が ProblemDetails でない応答を返したときの、下流の HTTP のステータス（502 のとき）。
 	DownstreamStatus int `json:"downstreamStatus,omitzero"`
-	// DownstreamCause は下流の cause。
-	DownstreamCause string `json:"downstreamCause,omitempty"`
-	// OperationID は操作の記録の ID（加入者の作成・変更・削除で、下流への書き込みを始めた後に失敗した場合。
-	// OPERATION_UNRESOLVED では、同じ IMSI の未完了の操作）。
-	OperationID string `json:"operationId,omitempty"`
-	// RolledBack は、補償で元に戻したか（OperationID を返す場合だけ）。
-	RolledBack *bool `json:"rolledBack,omitempty"`
-	// Conflicts は、SUBSCRIBER_ALREADY_EXISTS で同じ IMSI のものがあった場所。
-	Conflicts []string `json:"conflicts,omitempty"`
 }
 
 func newProblem(status int, cause, detail string) *problem {
@@ -71,9 +55,8 @@ func (p *problem) write(w http.ResponseWriter) {
 	json.MarshalWrite(w, p)
 }
 
-// internalError は内部エラー（Valkey のエラー等）を記録し、詳細を伏せた 500 を返す。
 func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, err error) {
-	h.Log.ErrorContext(r.Context(), "request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+	h.Log.ErrorContext(r.Context(), "request failed", "event_id", "SYSTEM_ERROR", "method", r.Method, "path", r.URL.Path, "error", err)
 	newProblem(http.StatusInternalServerError, causeSystemFailure, "").write(w)
 }
 

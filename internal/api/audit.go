@@ -2,57 +2,22 @@ package api
 
 import (
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"net/http"
 	"regexp"
 	"strconv"
 	"time"
-
-	"github.com/oyaguma3/aka-provisioner/internal/store"
-	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
-// record は操作を監査ログに残す（設計概要 §10.2）。details に秘密の値を入れてはならない。
-func (h *Handler) record(r *http.Request, action, target, operationID, result string, details map[string]any) {
-	ctx := r.Context()
-	e := store.AuditEntry{
-		Operator:    downstreamOperator(r),
-		MgmtClient:  mgmtClientFrom(ctx),
-		Action:      action,
-		Target:      target,
-		TraceID:     trace.From(ctx),
-		OperationID: operationID,
-		Result:      result,
-	}
-	if details != nil {
-		b, err := json.Marshal(details, json.Deterministic(true))
-		if err != nil {
-			h.Log.ErrorContext(ctx, "marshal audit details", "action", action, "error", err)
-		}
-		e.Details = string(b)
-	}
-	h.Audit.Record(ctx, e)
-}
-
-// downstreamOperator は要求の X-Operator-Id（checkOperator で形式を確かめた値。省略なら空文字列）。
-func downstreamOperator(r *http.Request) string {
-	if v := r.Header.Get(operatorHeader); operatorPattern.MatchString(v) {
-		return v
-	}
-	return ""
-}
-
+// auditEntryJSON は GET /audit-logs の 1 件（aka-radius の監査ログの口と同じ形）。
 type auditEntryJSON struct {
-	ID          string         `json:"id"`
-	Time        time.Time      `json:"time"`
-	Operator    string         `json:"operator"`
-	MgmtClient  string         `json:"mgmtClient"`
-	Action      string         `json:"action"`
-	Target      string         `json:"target"`
-	TraceID     string         `json:"traceId"`
-	OperationID string         `json:"operationId,omitempty"`
-	Result      string         `json:"result"`
-	Details     jsontext.Value `json:"details,omitempty"`
+	ID         string         `json:"id"`
+	Time       time.Time      `json:"time"`
+	Operator   string         `json:"operator"`
+	MgmtClient string         `json:"mgmtClient"`
+	Action     string         `json:"action"`
+	Target     string         `json:"target"`
+	Detail     jsontext.Value `json:"detail,omitempty"`
+	TraceID    string         `json:"traceId"`
 }
 
 type auditListJSON struct {
@@ -60,9 +25,10 @@ type auditListJSON struct {
 	NextBefore string           `json:"nextBefore,omitempty"`
 }
 
+// auditIDPattern は Stream のエントリID の形式。
 var auditIDPattern = regexp.MustCompile(`^[0-9]{1,20}-[0-9]{1,20}$`)
 
-// listAuditLogs は provisioner の監査ログを新しい順に返す。
+// listAuditLogs は provisioner の監査ログを新しい順に返す（GET /audit-logs）。下流の監査ログは /<下流>/audit-logs で中継する。
 func (h *Handler) listAuditLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var params []invalidParam
@@ -92,11 +58,10 @@ func (h *Handler) listAuditLogs(w http.ResponseWriter, r *http.Request) {
 	for i, e := range entries {
 		out.Items[i] = auditEntryJSON{
 			ID: e.ID, Time: e.Time, Operator: e.Operator, MgmtClient: e.MgmtClient, Action: e.Action, Target: e.Target,
-			TraceID: e.TraceID, OperationID: e.OperationID, Result: e.Result,
+			TraceID: e.TraceID,
 		}
-		// 保存してある JSON をそのまま埋め込む。壊れている場合は省く。
-		if v := jsontext.Value(e.Details); e.Details != "" && v.IsValid() {
-			out.Items[i].Details = v
+		if v := jsontext.Value(e.Detail); e.Detail != "" && v.IsValid() {
+			out.Items[i].Detail = v
 		}
 	}
 	writeJSON(w, http.StatusOK, out)

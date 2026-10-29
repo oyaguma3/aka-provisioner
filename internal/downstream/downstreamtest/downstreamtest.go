@@ -1,4 +1,4 @@
-// Package downstreamtest は、下流の API の代わりになる mTLS のテスト用サーバーを提供する（テスト専用）。
+// Package downstreamtest は、下流の管理API の代わりになる mTLS のテスト用サーバーと、下流の登録簿のファイルを作る（テスト専用）。
 package downstreamtest
 
 import (
@@ -16,30 +16,23 @@ import (
 	"time"
 
 	"github.com/oyaguma3/aka-provisioner/internal/certs"
-	"github.com/oyaguma3/aka-provisioner/internal/downstream"
 )
 
-// Discard はテストで使う、何も出力しないロガー。
+// Discard はログを捨てる slog.Logger。
 var Discard = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-// Server は mTLS の下流の代わりのサーバーと、それにつなぐクライアントの設定。
+// Server は下流の代わりのサーバー。クライアント証明書は求めるが、どれでも受け付ける。
 type Server struct {
 	*httptest.Server
-	// Options はこのサーバーにつなぐクライアントの設定（Name は呼び出し側で設定する）。
-	Options downstream.Options
-	// ClientFP はクライアントが提示するはずの証明書のフィンガープリント。
-	ClientFP string
-	// Dir は証明書のファイルを置いたディレクトリ。
-	Dir string
+	// BaseURL は下流の管理API の基底 URL（/admin/v2）。
+	BaseURL string
+	// ServerCertPEM はサーバー証明書（登録簿の serverCert に書くもの）。
+	ServerCertPEM []byte
 }
 
-// NewServer はハンドラー h を mTLS で提供するサーバーを立てる。
-// 下流と同じく、クライアント証明書は RequestClientCert で求めて VerifyConnection で確かめる（Server.TLS で差し替えられる）。
-// クライアント証明書は証明書と秘密鍵を 1 つの PEM にまとめた形（gen-client-cert の標準出力と同じ）で渡す。
+// NewServer は h で応える下流の代わりのサーバーを起動する。
 func NewServer(t *testing.T, h http.HandlerFunc) *Server {
 	t.Helper()
-	dir := t.TempDir()
-
 	serverCertPEM, serverKeyPEM, err := certs.SelfSigned("downstream", []string{"127.0.0.1"}, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -48,15 +41,6 @@ func NewServer(t *testing.T, h http.HandlerFunc) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientCertPEM, clientKeyPEM, err := certs.SelfSignedClient("provisioner", time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	srv := httptest.NewUnstartedServer(h)
 	srv.Config.ErrorLog = slog.NewLogLogger(Discard.Handler(), slog.LevelWarn)
 	srv.TLS = &tls.Config{
@@ -71,24 +55,52 @@ func NewServer(t *testing.T, h http.HandlerFunc) *Server {
 	}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-
-	WriteFile(t, filepath.Join(dir, "client.pem"), append(clientCertPEM, clientKeyPEM...))
-	WriteFile(t, filepath.Join(dir, "server.pem"), serverCertPEM)
-	return &Server{
-		Server: srv,
-		Options: downstream.Options{
-			BaseURL:        srv.URL + "/admin/v1",
-			ClientCertFile: filepath.Join(dir, "client.pem"),
-			ServerCertFile: filepath.Join(dir, "server.pem"),
-			Timeout:        2 * time.Second,
-			Log:            Discard,
-		},
-		ClientFP: certs.Fingerprint(clientCert.Leaf),
-		Dir:      dir,
-	}
+	return &Server{Server: srv, BaseURL: srv.URL + "/admin/v2", ServerCertPEM: serverCertPEM}
 }
 
-// WriteFile はファイルを書く。
+// Registry は WriteRegistry で書いた登録簿。
+type Registry struct {
+	// Path は登録簿のファイルのパス。
+	Path string
+	// Dir は登録簿と証明書を置いたディレクトリ。
+	Dir string
+	// ClientFP は provisioner のクライアント証明書のフィンガープリント。
+	ClientFP string
+}
+
+// WriteRegistry は、vecgen と radius をそれぞれの基底 URL とサーバー証明書で指す登録簿のファイルを、
+// provisioner のクライアント証明書とともに一時のディレクトリに書く。
+func WriteRegistry(t *testing.T, vecgenURL string, vecgenCert []byte, radiusURL string, radiusCert []byte) Registry {
+	t.Helper()
+	dir := t.TempDir()
+	clientCertPEM, clientKeyPEM, err := certs.SelfSignedClient("provisioner", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	WriteFile(t, filepath.Join(dir, "client.pem"), clientCertPEM)
+	WriteFile(t, filepath.Join(dir, "client.key"), clientKeyPEM)
+	WriteFile(t, filepath.Join(dir, "vecgen-admin.pem"), vecgenCert)
+	WriteFile(t, filepath.Join(dir, "radius-admin.pem"), radiusCert)
+	reg := map[string]any{
+		"clientCert": "client.pem",
+		"clientKey":  "client.key",
+		"vecgen":     map[string]string{"url": vecgenURL, "serverCert": "vecgen-admin.pem"},
+		"radius":     map[string]string{"url": radiusURL, "serverCert": "radius-admin.pem"},
+	}
+	b, err := json.Marshal(reg, json.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "downstreams.json")
+	WriteFile(t, path, b)
+	return Registry{Path: path, Dir: dir, ClientFP: certs.Fingerprint(clientCert.Leaf)}
+}
+
+// WriteFile はテスト用のファイルを書く。
 func WriteFile(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -96,7 +108,7 @@ func WriteFile(t *testing.T, path string, data []byte) {
 	}
 }
 
-// ClosedAddr は、待ち受けていないことが確かなアドレスを返す。
+// ClosedAddr は、接続を受け付けないループバックのアドレスを返す。
 func ClosedAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -1,9 +1,8 @@
-// aka-provisioner は、EAP-AKA RADIUS PoC（aka-radius）の Provisioning API と
-// aka-vecgen の管理API を組み合わせて操作する統合API。設計は docs/design-overview.md を参照。
+// aka-provisioner は、管理面の aka-ossbss から下流（aka-vecgen・aka-radius の管理API）への変更の経路を 1 つにまとめる中継。
+// 許した口だけを通し、書き込みでは Idempotency-Key を必須にし、監査ログを残す。設計は docs/design-overview.md を参照。
 package main
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -16,51 +15,38 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/oyaguma3/aka-provisioner/internal/akaapi"
 	"github.com/oyaguma3/aka-provisioner/internal/api"
 	"github.com/oyaguma3/aka-provisioner/internal/audit"
 	"github.com/oyaguma3/aka-provisioner/internal/certs"
 	"github.com/oyaguma3/aka-provisioner/internal/config"
 	"github.com/oyaguma3/aka-provisioner/internal/downstream"
-	"github.com/oyaguma3/aka-provisioner/internal/provapi"
+	"github.com/oyaguma3/aka-provisioner/internal/health"
 	"github.com/oyaguma3/aka-provisioner/internal/server"
 	"github.com/oyaguma3/aka-provisioner/internal/store"
-	"github.com/oyaguma3/aka-provisioner/internal/subscriber"
 )
 
 // version はビルド時に -ldflags "-X main.version=..." で埋め込む。
 var version = "dev"
 
-// 操作の記録とロックの既定値（設計概要 §9）。
 const (
-	// operationRetention は、完了した操作の記録を残す期間。
-	operationRetention = 7 * 24 * time.Hour
-	// retryDelay は、補償・やり直しが失敗したとき、次に試みるまでの時間。失敗するたびに倍にする。
-	retryDelay = 30 * time.Second
-	// maxRetryDelay は、次に試みるまでの時間の上限。
-	maxRetryDelay = 10 * time.Minute
-	// giveUpAfter は、自動のやり直しをやめて failed にするまでの時間（操作の作成から。手でやり直すと延びる）。
-	giveUpAfter = 24 * time.Hour
-	// workerInterval は、ワーカーが未完了の操作を見る間隔。
-	workerInterval = 30 * time.Second
-	// workerStopTimeout は、停止のときにワーカーが処理中の操作を終えるのを待つ上限。超えたら待たずに終了する
-	// （操作の記録が残るので、次の起動でワーカーが続きを行う）。サーバーの停止の上限（10 秒）と合わせて、
-	// compose の stop_grace_period（30 秒）に収める。
-	workerStopTimeout = 15 * time.Second
+	// statusInterval は下流の /status を集める間隔（設計概要 §9）。
+	statusInterval = 30 * time.Second
+	// auditMaintainInterval は監査ログのファイルを圧縮・削除する間隔。
+	auditMaintainInterval = time.Hour
 )
 
 const usage = `usage: aka-provisioner <command>
 
 commands:
   serve              サーバーを起動する（コマンド省略時の既定）
-  check-downstream   下流（本PoCの Provisioning API、aka-vecgen の管理API）に接続できるか確かめる
+  check-downstream   下流の登録簿を読み、全下流の /status に接続できるか確かめる
   gen-client-cert    下流に提示するクライアント証明書と秘密鍵を作る
                      （aka-provisioner gen-client-cert -h で使い方を表示）
   server-cert        provisioner の API のサーバー証明書（PEM）を標準出力に出す（なければ自己署名を作る）。
-                     管理クライアント（BFF など）に検証用として渡す
-  healthcheck        動いている provisioner の API に接続できるかを確かめる（compose の healthcheck 用）
+                     管理クライアント（aka-ossbss）に検証用として渡す
+  healthcheck        同じコンテナのループバックの healthcheck の口に問い合わせる（compose の healthcheck 用）
 
-設定は環境変数で与える。
+設定は環境変数で与える。下流の登録簿・管理クライアントのピン・サーバー証明書は SIGHUP で読み直す。
 `
 
 func main() {
@@ -96,248 +82,208 @@ func main() {
 	}
 }
 
+// fatal は起動の誤りをログに出し、そのエラーを返す（main が終了コード 1 で終える）。
+func fatal(log *slog.Logger, msg, eventID string, err error) error {
+	log.Error(msg, "event_id", eventID, "error", err.Error())
+	return err
+}
+
 func serve(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	if err := cfg.CheckServe(); err != nil {
-		return err
-	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
-	log.Info("starting", "version", version)
+	log.Info("starting", "event_id", "STARTING", "version", version)
 
 	openCtx, cancelOpen := context.WithTimeout(ctx, 10*time.Second)
 	st, err := store.Open(openCtx, store.Options{Addr: cfg.ValkeyAddr, Password: cfg.ValkeyPassword})
 	cancelOpen()
 	if err != nil {
-		return err
+		return fatal(log, "failed to connect to Valkey", "VALKEY_CONN_ERR", err)
 	}
 	defer st.Close()
 
 	created, err := certs.EnsureFiles(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.TLSHosts)
 	if err != nil {
-		return err
+		return fatal(log, "failed to prepare server certificate", "SERVER_CERT_LOAD_ERR", err)
 	}
 	if created {
 		log.Info("generated self-signed server certificate", "cert", cfg.TLSCertFile, "hosts", cfg.TLSHosts)
 	}
-	cert, err := certs.LoadFile(cfg.TLSCertFile, cfg.TLSKeyFile, log)
+	serverCert, err := certs.LoadFile(cfg.TLSCertFile, cfg.TLSKeyFile, log)
 	if err != nil {
-		return err
+		return fatal(log, "failed to load server certificate", "SERVER_CERT_LOAD_ERR", err)
 	}
-	log.Info("loaded server certificate", "cert", cfg.TLSCertFile,
-		"fingerprint", certs.Fingerprint(cert.Leaf()), "not_after", cert.Leaf().NotAfter,
-		"dns_names", cert.Leaf().DNSNames, "ip_addresses", cert.Leaf().IPAddresses)
-	for fp, name := range cfg.AdminClients {
-		log.Info("admin client", "name", name, "fingerprint", fp)
-	}
-	log.Info("plmn map", "entries", plmnMapString(cfg))
+	logServerCert(log, "loaded server certificate", "SERVER_CERT_LOADED", serverCert)
 
-	prov, aka, err := newClients(cfg, log)
+	pins, err := server.LoadPins(cfg.AdminClientsFile)
 	if err != nil {
-		return err
+		return fatal(log, "failed to load admin clients", "ADMIN_CLIENTS_LOAD_ERR", err)
 	}
-	logClient(log, prov.Client)
-	if aka != nil {
-		logClient(log, aka.Client)
-	} else {
-		log.Info("aka-vecgen is not configured (PROVISIONER_AKA_URL is empty)")
-	}
-	// 起動時点で下流が動いていなくても起動は続ける。/status と各操作のエラーで示す。
-	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	checkProv(checkCtx, log, prov)
-	if aka != nil {
-		checkAka(checkCtx, log, aka, cfg.AkaAVClientID)
-	}
-	cancel()
+	logPins(log, "loaded admin clients", "ADMIN_CLIENTS_LOADED", pins)
 
-	auditRec := &audit.Recorder{Log: log, Store: st, MaxLen: cfg.AuditMaxLen}
+	reg, err := downstream.LoadRegistry(cfg.DownstreamsFile, cfg.DownstreamTimeout, log)
+	if err != nil {
+		return fatal(log, "failed to load downstreams registry", "DOWNSTREAMS_LOAD_ERR", err)
+	}
+	logRegistry(log, "loaded downstreams registry", "DOWNSTREAMS_LOADED", reg)
+
+	if err := audit.CheckWritableDir(cfg.AuditDir); err != nil {
+		return fatal(log, "audit directory is not writable", "AUDIT_DIR_ERR", err)
+	}
+	auditFiles := audit.NewFiles(cfg.AuditDir, cfg.AuditRetentionDays)
+
+	healthSrv, err := health.Start(cfg.HealthAddr, st.Ping, log)
+	if err != nil {
+		return fatal(log, "failed to listen for healthcheck", "SYS_LISTEN_ERR", err)
+	}
+	defer healthSrv.Close()
+
+	relayer := func(n downstream.Name) api.Relayer { return reg.Client(n) }
+	poller := &api.Poller{Downstream: relayer, Log: log}
 	h := &api.Handler{
-		Log:               log,
-		MgmtClient:        func(r *http.Request) string { return server.AdminClientName(r, cfg.AdminClients) },
-		Prov:              prov,
-		AkaAVClientID:     cfg.AkaAVClientID,
-		PLMNMap:           cfg.PLMNMap,
-		Store:             st,
-		DownstreamTimeout: cfg.DownstreamTimeout,
-		Audit:             auditRec,
-		Version:           version,
-		StartedAt:         time.Now().UTC(),
+		Log:        log,
+		MgmtClient: pins.NameFromRequest,
+		Downstream: relayer,
+		Store:      st,
+		Audit:      &audit.Recorder{Log: log, Store: st, MaxLen: cfg.AuditMaxLen, Files: auditFiles},
+		Status: &api.StatusSource{
+			Version:             version,
+			StartedAt:           time.Now().UTC(),
+			AdminClients:        pins.Names,
+			DownstreamsLoadedAt: reg.LoadedAt,
+			ClientCertificate:   reg.ClientCertificate,
+			ServerCertificate:   serverCert.Leaf,
+			Poller:              poller,
+		},
 	}
-	subs := &subscriber.Service{
-		Prov: prov, AVClientID: cfg.AkaAVClientID, PLMN: cfg.PLMNMap, Store: st, Log: log, Audit: auditRec,
-		LockTTL: api.LockTTL, Retention: operationRetention,
-		RetryDelay: retryDelay, MaxRetryDelay: maxRetryDelay, GiveUpAfter: giveUpAfter,
-	}
-	if aka != nil {
-		// nil の *akaapi.Client をそのまま入れると、nil でないインターフェースになるので分ける。
-		h.Aka, subs.Aka = aka, aka
-	}
-	h.Subscribers = subs
-	// やり直しのワーカー。要求が落ちた操作と、補償・やり直しが失敗した操作を続ける（設計概要 §9.3）。
-	// サーバーが停止の合図以外で終わった（待ち受けの失敗など）ときもワーカーを止めるよう、別の ctx で動かす。
-	workerCtx, stopWorker := context.WithCancel(ctx)
-	defer stopWorker()
+
+	// 背後の処理（下流の状態、監査ログのファイルの整理、SIGHUP の読み直し）は、サーバーが止まったら止める。
+	bgCtx, stopBG := context.WithCancel(ctx)
+	defer stopBG()
 	var wg sync.WaitGroup
-	wg.Go(func() { subs.RunWorker(workerCtx, workerInterval) })
+	wg.Go(func() { poller.Run(bgCtx, statusInterval) })
+	wg.Go(func() { maintainAudit(bgCtx, log, auditFiles) })
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	wg.Go(func() {
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-hup:
+				if reload(log, pins, reg, serverCert) {
+					poller.PollOnce(bgCtx)
+				}
+			}
+		}
+	})
+
 	err = server.Run(ctx, server.Options{
 		Addr:           cfg.Addr,
-		GetCertificate: cert.GetCertificate,
-		AdminClients:   cfg.AdminClients,
+		GetCertificate: serverCert.GetCertificate,
+		Pins:           pins,
 		Handler:        h.Routes(),
 		Log:            log,
 	})
-	// 停止のときは、ワーカーが処理中の操作を終えるのを待つ（途中で終わると補償が中断する）。
-	stopWorker()
-	waitWorker(&wg, workerStopTimeout, log)
+	stopBG()
+	wg.Wait()
 	return err
 }
 
-// waitWorker は、ワーカーが戻るのを timeout まで待つ。
-func waitWorker(wg *sync.WaitGroup, timeout time.Duration, log *slog.Logger) {
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		log.Info("worker stopped")
-	case <-time.After(timeout):
-		log.Warn("worker did not stop in time; the operation in progress will be resumed after restart", "timeout", timeout)
-	}
-}
-
-// newClients は下流のクライアントを作る。aka-vecgen を扱わない設定なら aka は nil。
-func newClients(cfg config.Config, log *slog.Logger) (*provapi.Client, *akaapi.Client, error) {
-	prov, err := provapi.New(downstream.Options{
-		BaseURL:        cfg.ProvURL,
-		ClientCertFile: cfg.ClientCertFile,
-		ClientKeyFile:  cfg.ClientKeyFile,
-		ServerCertFile: cfg.ProvServerCertFile,
-		Timeout:        cfg.DownstreamTimeout,
-		Log:            log,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("provisioning-api client: %w", err)
-	}
-	if !cfg.AkaEnabled() {
-		return prov, nil, nil
-	}
-	aka, err := akaapi.New(downstream.Options{
-		BaseURL:        cfg.AkaURL,
-		ClientCertFile: cfg.ClientCertFile,
-		ClientKeyFile:  cfg.ClientKeyFile,
-		ServerCertFile: cfg.AkaServerCertFile,
-		Timeout:        cfg.DownstreamTimeout,
-		Log:            log,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("aka-vecgen client: %w", err)
-	}
-	return prov, aka, nil
-}
-
-func logClient(log *slog.Logger, c *downstream.Client) {
-	log.Info("downstream client", "downstream", string(c.Name()), "url", c.BaseURL(),
-		"client_cert_fingerprint", certs.Fingerprint(c.ClientCertificate()),
-		"client_cert_not_after", c.ClientCertificate().NotAfter)
-}
-
-func checkProv(ctx context.Context, log *slog.Logger, prov *provapi.Client) {
-	if st, err := prov.Status(ctx); err != nil {
-		log.Warn("provisioning-api is not available", "error", err, "hint", provapi.Diagnose(err))
+// reload は SIGHUP で、ピン・下流の登録簿・サーバー証明書を読み直す（それぞれ、失敗したら前のまま）。
+// 下流の登録簿を読み直せたら true を返す（下流の状態をすぐに集め直す）。
+func reload(log *slog.Logger, pins *server.Pins, reg *downstream.Registry, serverCert *certs.File) bool {
+	if err := pins.Reload(); err != nil {
+		log.Error("failed to reload admin clients (keeping the previous ones)", "event_id", "ADMIN_CLIENTS_RELOAD_ERR", "error", err.Error())
 	} else {
-		log.Info("provisioning-api is available", "server_version", st.Version, "node_name", st.NodeName)
+		logPins(log, "reloaded admin clients", "ADMIN_CLIENTS_RELOADED", pins)
+	}
+	if err := serverCert.Reload(); err != nil {
+		log.Error("failed to reload server certificate (keeping the previous one)", "event_id", "SERVER_CERT_RELOAD_ERR", "error", err.Error())
+	} else {
+		logServerCert(log, "reloaded server certificate", "SERVER_CERT_RELOADED", serverCert)
+	}
+	if err := reg.Reload(); err != nil {
+		log.Error("failed to reload downstreams registry (keeping the previous one)", "event_id", "DOWNSTREAMS_RELOAD_ERR", "error", err.Error())
+		return false
+	}
+	logRegistry(log, "reloaded downstreams registry", "DOWNSTREAMS_RELOADED", reg)
+	return true
+}
+
+func maintainAudit(ctx context.Context, log *slog.Logger, files *audit.Files) {
+	t := time.NewTicker(auditMaintainInterval)
+	defer t.Stop()
+	for {
+		if err := files.Maintain(time.Now()); err != nil {
+			log.Error("failed to maintain audit files", "event_id", "AUDIT_MAINTAIN_ERR", "error", err.Error())
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 	}
 }
 
-func checkAka(ctx context.Context, log *slog.Logger, aka *akaapi.Client, avClientID int64) {
-	st, err := aka.Status(ctx)
-	if err != nil {
-		log.Warn("aka-vecgen is not available", "error", err, "hint", akaapi.Diagnose(err))
-		return
-	}
-	log.Info("aka-vecgen is available", "server_version", st.Version)
-	switch c, err := aka.GetAVClient(ctx, avClientID); {
-	case err != nil:
-		log.Warn("av client of vector-gateway is not available", "av_client_id", avClientID, "error", err)
-	case !c.Enabled:
-		log.Warn("av client of vector-gateway is disabled", "av_client_id", avClientID, "name", c.Name)
-	default:
-		log.Info("av client of vector-gateway", "av_client_id", avClientID, "name", c.Name)
-	}
+func logPins(log *slog.Logger, msg, eventID string, pins *server.Pins) {
+	names, _ := pins.Names()
+	log.Info(msg, "event_id", eventID, "admin_clients", strings.Join(names, ","), "fingerprints", pins.Fingerprints())
 }
 
-func plmnMapString(cfg config.Config) string {
-	var parts []string
-	for _, e := range cfg.PLMNMap.Entries() {
-		parts = append(parts, e.PLMN+"="+string(e.KeyStore))
-	}
-	return strings.Join(parts, ",")
+func logServerCert(log *slog.Logger, msg, eventID string, f *certs.File) {
+	leaf := f.Leaf()
+	log.Info(msg, "event_id", eventID, "fingerprint", certs.Fingerprint(leaf), "not_after", leaf.NotAfter,
+		"dns_names", leaf.DNSNames, "ip_addresses", leaf.IPAddresses)
 }
 
-// checkDownstream は下流への接続を確かめ、結果を表示する。導入時の確認に使う。
+func logRegistry(log *slog.Logger, msg, eventID string, reg *downstream.Registry) {
+	args := []any{"event_id", eventID,
+		"client_cert_fingerprint", certs.Fingerprint(reg.ClientCertificate()), "client_cert_not_after", reg.ClientCertificate().NotAfter}
+	for _, n := range downstream.Names {
+		c := reg.Client(n)
+		args = append(args, string(n)+"_url", c.BaseURL(), string(n)+"_server_cert_not_after", c.ServerCertificate().NotAfter)
+	}
+	log.Info(msg, args...)
+}
+
+// checkDownstream は登録簿を読み、全下流の /status に接続できるかを確かめて表示する。導入時の確認に使う。
 func checkDownstream(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	prov, aka, err := newClients(cfg, log)
+	reg, err := downstream.LoadRegistry(cfg.DownstreamsFile, cfg.DownstreamTimeout, log)
 	if err != nil {
 		return err
 	}
-	fmt.Println("クライアント証明書のフィンガープリント:", certs.Fingerprint(prov.ClientCertificate()))
-	fmt.Println("PLMN マップ:", cmp.Or(plmnMapString(cfg), "（なし。すべての加入者の鍵を本PoCに置く）"))
-
+	fmt.Println("下流の登録簿:", cfg.DownstreamsFile)
+	fmt.Println("クライアント証明書のフィンガープリント:", certs.Fingerprint(reg.ClientCertificate()))
 	var errs []error
-	fmt.Println()
-	fmt.Println("本PoCの Provisioning API:", prov.BaseURL())
-	if st, err := prov.Status(ctx); err != nil {
-		printFailure(provapi.Diagnose(err), err)
-		errs = append(errs, err)
-	} else {
-		fmt.Printf("  接続できました。provisioning-api %s（ノード %s、加入者 %d、RADIUSクライアント %d、認可ポリシー %d）\n",
-			st.Version, st.NodeName, st.SubscriberCount, st.ClientCount, st.PolicyCount)
-	}
-
-	fmt.Println()
-	if aka == nil {
-		fmt.Println("aka-vecgen の管理API: 設定なし（PROVISIONER_AKA_URL が空）")
-		return errors.Join(errs...)
-	}
-	fmt.Println("aka-vecgen の管理API:", aka.BaseURL())
-	st, err := aka.Status(ctx)
-	if err != nil {
-		printFailure(akaapi.Diagnose(err), err)
-		return errors.Join(append(errs, err)...)
-	}
-	fmt.Printf("  接続できました。aka-vecgen %s（加入者 %d、AVクライアント %d）\n", st.Version, st.SubscriberCount, st.ClientCount)
-	switch c, err := aka.GetAVClient(ctx, cfg.AkaAVClientID); {
-	case downstream.CauseOf(err) == akaapi.CauseClientNotFound:
-		fmt.Printf("  vector-gateway の AVクライアント（ID %d）が aka-vecgen にありません。PROVISIONER_AKA_AV_CLIENT_ID を確認してください。\n",
-			cfg.AkaAVClientID)
-		errs = append(errs, err)
-	case err != nil:
-		printFailure("", err)
-		errs = append(errs, err)
-	case !c.Enabled:
-		fmt.Printf("  vector-gateway の AVクライアント: ID %d（%s）は無効になっています。\n", c.ID, c.Name)
-		errs = append(errs, errors.New("av client is disabled"))
-	default:
-		fmt.Printf("  vector-gateway の AVクライアント: ID %d（%s、証明書の有効期限 %s）\n",
-			c.ID, c.Name, c.NotAfter.Local().Format(time.DateOnly))
+	for _, n := range downstream.Names {
+		c := reg.Client(n)
+		fmt.Println()
+		fmt.Printf("%s: %s（サーバー証明書の有効期限 %s）\n", n, c.BaseURL(), c.ServerCertificate().NotAfter.Local().Format(time.DateOnly))
+		resp, err := c.Relay(ctx, downstream.RelayRequest{Method: http.MethodGet, Path: []string{"status"}})
+		switch {
+		case err != nil:
+			fmt.Println("  接続できませんでした:", err)
+			if hint := downstream.Diagnose(n, err); hint != "" {
+				fmt.Println("  " + hint)
+			}
+			errs = append(errs, err)
+		case resp.Status != http.StatusOK:
+			fmt.Printf("  接続できましたが、/status が %d を返しました。\n", resp.Status)
+			errs = append(errs, fmt.Errorf("%s: status %d", n, resp.Status))
+		default:
+			fmt.Println("  接続できました。")
+		}
 	}
 	return errors.Join(errs...)
-}
-
-func printFailure(hint string, err error) {
-	fmt.Println("  接続できませんでした:", err)
-	if hint != "" {
-		fmt.Println("  " + hint)
-	}
 }
 
 // serverCert は provisioner の API のサーバー証明書を標準出力に出す。ファイルがなければ自己署名を作る。

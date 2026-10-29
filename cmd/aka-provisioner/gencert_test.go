@@ -24,9 +24,9 @@ func TestGenClientCertStdout(t *testing.T) {
 	if cert.Leaf.Subject.CommonName != "provisioner" {
 		t.Errorf("CN = %q", cert.Leaf.Subject.CommonName)
 	}
-	// 下流 2 つの .env に貼れる行を出す。
+	// 下流のピンのファイルに書く行を出す。
 	fp := certs.Fingerprint(cert.Leaf)
-	for _, want := range []string{"PROVISIONING_API_ADMIN_CLIENTS=provisioner=" + fp + "\n", "VECGEN_ADMIN_CLIENTS=provisioner=" + fp + "\n"} {
+	for _, want := range []string{"\nprovisioner=" + fp + "\n"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr = %q, want %q", stderr.String(), want)
 		}
