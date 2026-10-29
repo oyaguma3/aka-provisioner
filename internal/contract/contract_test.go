@@ -77,7 +77,8 @@ func (c *client) do(method, path, key, traceID string, body any) response {
 	c.t.Helper()
 	var rd io.Reader
 	if body != nil {
-		b, err := json.Marshal(body)
+		// 同じ内容の再送が同じバイト列になるよう、項目の並びを決まった順にする（map の並びは決まらない）。
+		b, err := json.Marshal(body, json.Deterministic(true))
 		if err != nil {
 			c.t.Fatal(err)
 		}
