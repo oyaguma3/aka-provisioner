@@ -1,5 +1,7 @@
 # 運用ガイド
 
+> **この文書は PoC の作り（`/admin/v1`、加入者の統合操作と補償、PLMN マップ）の手順のままです。** MVP セットの段階 3-1 で作りを変えたので（[設計概要](design-overview.md) §14 の「段階 3-1 で決めたこと」）、段階 3-5 で書き直します。今の導入は [README](../README.md) を見てください。
+
 - 対象: aka-provisioner（統合API。コマンド名 `aka-provisioner`。以下「provisioner」）を導入・運用する人。
 - 関連: [README](../README.md)、[設計概要（PoC。今の作り）](poc/design-overview.md)、[API 仕様](openapi/provisioner-api.yaml)、本PoC（aka-radius）の `docs/B-02_アプリケーションデプロイ手順書_r*.md` §14（aka-vecgen への接続）・§15（Provisioning API の有効化）、aka-vecgen の `docs/operation-guide.md`
 - 本書の手順は、2026-10-10 に検証用の実機（Debian 13、Docker Engine と compose プラグイン、Tailscale）で実行して確かめた。別ホストの構成は、同じ tailnet の別のマシン（WSL）から確かめた。

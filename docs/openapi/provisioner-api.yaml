@@ -1,110 +1,70 @@
 openapi: 3.0.3
 info:
   title: aka-provisioner API
-  version: 0.3.0
+  version: 2.0.0
   description: |
-    EAP-AKA RADIUS PoC（以下「本PoC」）の Provisioning API（以下「prov」）と、aka-vecgen の管理API（以下「aka」）を
-    組み合わせて操作する統合API。設計は `docs/poc/design-overview.md`（今の作り）を参照。
-    作法は下流の 2 つの API（prov 0.4.0、aka 0.2.0）に揃えている。
-
-    0.3.0 の変更:
-    - 加入者の停止・再開（`PUT /policies/{imsi}/status`。prov の中継）を加えた。停止の印は本PoCの認可ポリシーの状態
-      （`status`: `active` / `suspended`）で、鍵の置き場所によらず本PoCの Auth Server が認証を拒否する。
-    - 加入者の統合リソースに `status`（認可ポリシーの状態）を加えた。作成・変更の本文では指定できない（作成は常に `active`）。
-
-    加入者:
-    - 加入者を「IMSI＋鍵の置き場所（`keyStore`）＋認可ポリシー」として扱う（`/subscribers`）。
-      - `poc`（接続方式 `00`）: 鍵を本PoCの `sub:{IMSI}` に持つ（prov の `/subscribers`）。
-      - `aka`（接続方式 `01`）: 鍵を aka-vecgen が持つ（aka の `/subscribers`）。本PoCの vector-gateway の
-        AVクライアントID（設定 `PROVISIONER_AKA_AV_CLIENT_ID`）を、加入者の許可クライアントに含める。
-      - 認可ポリシーは、置き場所によらず本PoCに持つ（prov の `/policies`）。
-    - 置き場所は、IMSI の PLMN と設定 `PROVISIONER_PLMN_MAP`（本PoCの `VECTOR_GATEWAY_PLMN_MAP` と同じ形式・同じ値）で決まる。
-      先頭 6 桁、次に先頭 5 桁の順で照合し、`01` に当たれば `aka`、それ以外は `poc`。
-    - 複数のノードにまたがる作成・変更・削除は、操作の記録（`/operations`）を残しながら行い、途中で失敗したら
-      補償（作成・変更）またはやり直し（削除）で整える。
+    管理面の aka-ossbss から、下流（aka-vecgen・aka-radius の管理API 2.0.0）への変更の経路を 1 つにまとめる中継の API。
+    設計は `docs/design-overview.md`（§6〜§10、§17 の「段階 3-1 で決めたこと」）を参照。
+    0.3.0（`/admin/v1`。加入者の統合操作と補償、PLMN マップ、操作の記録）の後継で、互換は持たない。
 
     中継:
-    - RADIUSクライアント（`/clients`）、認可ポリシー（`/policies`）、セッション（`/sessions`）は prov と同じ形で中継する。
-      要求の本文は検証せずにそのまま送り、下流の応答（エラーを含む）をそのまま返す。
-    - 下流の監査ログ（`/prov/audit-logs`、`/aka/audit-logs`）と、vector-gateway の AVクライアント（`/aka/av-clients/{clientId}`）は、
-      下流の形のまま返す（読み取りだけ）。
+    - `/admin/v2/<下流>/<下流のパス>` を、下流の `/admin/v2/<下流のパス>` に中継する（下流は `vecgen` と `radius`。
+      radsec-ca とエッジは段階 4-2 で足す）。許すのは下の paths に挙げた口だけで、それ以外は 404（`ROUTE_NOT_ALLOWED`）。
+      aka-vecgen の鍵の読み出し（`GET /subscribers/{imsi}/keys`）と、RADIUS クライアントの書き込みは通さない。
+    - 要求の本文とクエリは解釈せずにそのまま送り、下流の応答（エラーを含む）をそのまま返す。項目は下流の OpenAPI
+      （aka-vecgen・aka-radius の `docs/openapi/admin-api.yaml`）を正とし、ここには写さない。
+    - 下流の ProblemDetails には `downstream`（`vecgen` / `radius`）を足す。`Location` は aka-provisioner のパスに書き換える。
+    - 下流につながらない・時間内に応答がないときは 503（`DOWNSTREAM_UNAVAILABLE`）、下流が ProblemDetails でない誤りを
+      返したときは 502（`DOWNSTREAM_ERROR`）。どちらも `downstream` つき。
+    - パスの値は形を確かめる（`imsi` は 5〜15 桁の数字、`clientId` は 1 以上の整数）。違えば 400（`MANDATORY_IE_INCORRECT`）。
+    - 要求の本文は 1 MiB まで。
 
     認証:
-    - mTLS 必須。設定 `PROVISIONER_ADMIN_CLIENTS` の管理クライアントの証明書（SHA-256 フィンガープリント）だけを受け付ける。
-      証明書なし、または未登録の証明書による接続は TLS ハンドシェイクで拒否する。
-    - 管理クライアントは全権として扱う。利用者や権限の概念はこの API にはない。
+    - mTLS 必須。管理クライアントのピンのファイル（`PROVISIONER_ADMIN_CLIENTS_FILE`。1 行に「識別名=SHA-256 フィンガープリント」）
+      にある証明書だけを受け付け、それ以外は TLS ハンドシェイクで断る（ログの `ADMIN_CLIENT_REJECTED`）。SIGHUP で読み直す。
+    - 管理クライアントは全権として扱う。利用者や権限の概念はこの API にはない（aka-ossbss が持つ）。
 
     操作者・トレース:
-    - `X-Operator-Id`（任意）を監査ログに記録し、そのまま下流 2 つに渡す。
-    - `X-Trace-ID`（任意）を受け取り、なければ採番する。同じ値を下流 2 つに渡し、ログ・監査ログ・操作の記録に残し、
-      応答の `X-Trace-ID` ヘッダーで返す（エラーの応答を含む）。
+    - `X-Operator-Id`（任意）を監査ログに残し、そのまま下流に渡す。
+    - `X-Trace-ID`（任意）を受け取り、なければ採番する。同じ値を下流に渡し、ログと監査ログに残し、応答の `X-Trace-ID` で返す。
 
     再送（Idempotency-Key）:
-    - 書き込みの要求には `Idempotency-Key` ヘッダーを付けられる。同じ管理クライアントから同じキーで届いた要求には、
-      24 時間のあいだ最初の応答をそのまま返し（`Idempotent-Replayed: true` を付ける）、下流は呼ばない。
-    - 最初の要求が処理中なら 409（`OPERATION_IN_PROGRESS`）、同じキーで内容（メソッド・パス・本文）が違えば 422（`IDEMPOTENCY_KEY_MISMATCH`）。
-
-    排他:
-    - 加入者の作成・変更・削除と、認可ポリシーの PUT・DELETE・停止・再開は、IMSI ごとに排他する。同じ IMSI の操作が処理中なら、
-      待たずに 409（`OPERATION_IN_PROGRESS`）を返す。
-    - 同じ IMSI に未完了（`running` / `retrying` / `failed`）の操作の記録があれば、加入者の作成・変更・削除と、
-      認可ポリシーの PUT・DELETE・停止・再開を 409（`OPERATION_UNRESOLVED`。`operationId` 付き）で断る。古い操作の続き（補償・やり直し）が
-      新しい操作の結果を消さないようにするため。その操作を `retry` か `dismiss` で片付けてから送り直す。
-    - 排他は provisioner を通る操作どうしでだけ効く。本PoCの Admin TUI、aka 版 GUI、下流の API を直接呼ぶ操作とは排他できない。
+    - 下流を書き換える口（下の paths で `Idempotency-Key` を求めるもの）では必須。なければ 400（`MANDATORY_IE_MISSING`）。
+      一括取得（`POST /subscribers/batch-get`）は何も変えないので求めない。
+    - 同じ管理クライアントから同じキーで届いた要求には、24 時間のあいだ最初の応答をそのまま返し（`Idempotent-Replayed: true`）、
+      下流は呼ばない。最初の要求が処理中なら 409（`OPERATION_IN_PROGRESS`）、同じキーで内容（メソッド・パス・クエリ・本文）が
+      違えば 422（`IDEMPOTENCY_KEY_MISMATCH`）。5xx の応答は覚えない（同じキーでやり直せる）。
+    - aka-vecgen・aka-radius にはキーを渡さない（再送の判定は aka-provisioner が受け持つ）。
 
     監査ログ:
-    - 変更操作と、秘密の値（Ki / OPc、共有シークレット）の取得は、provisioner の監査ログ（`/audit-logs`）に記録する。
-      下流もそれぞれの監査ログに記録する（管理クライアントは provisioner、操作者は `X-Operator-Id`）。
-
-    表記:
-    - 16進文字列は大文字・小文字のどちらも受け付け、小文字で返す。
-    - 日時は RFC 3339 形式の UTC。
-    - エラーは ProblemDetails（`application/problem+json`）で返す。下流の作法の `cause` / `invalidParams` に、
-      provisioner の拡張項目（`downstream`、`operationId` 等）を加える。
-
-    要求の解釈（加入者・操作の記録。中継は下流に従う）:
-    - 要求の本文は `application/json`。PATCH は `application/merge-patch+json`（`application/json` も受け付ける）。
-      それ以外の Content-Type は 400（`INVALID_MSG_FORMAT`）。本文の上限は 256KiB。
-    - 未知の項目、型の違う値、JSON の後ろに続くデータは 400（`INVALID_MSG_FORMAT`）。
-    - PATCH の `null` は 400（`OPTIONAL_IE_INCORRECT`）、空のオブジェクトは 400（`MANDATORY_IE_MISSING`）。
-    - 該当しないパスは 404、メソッドは 405 を ProblemDetails（`cause` なし）で返す。
-
+    - 下流を書き換える中継が成功（2xx）したときに残す。`action` は `<下流>.<口>`（例 `vecgen.subscriber.create`）、
+      `target` は IMSI、`detail` は下流の名前と本文の項目の名前だけ（値は残さない）。再送への応答では残さない。
+      Valkey の Stream と日ごとの JSONL のファイルに書く。
 servers:
-  - url: https://{host}:{port}/admin/v1
+  - url: https://{host}:{port}/admin/v2
     variables:
       host:
         default: localhost
       port:
         default: '9446'
-
 tags:
-  - name: status
-    description: provisioner と下流の状態
-  - name: subscribers
-    description: 加入者（鍵の置き場所と認可ポリシーをまとめて扱う）
-  - name: operations
-    description: 複数のノードにまたがる操作の記録
-  - name: clients
-    description: RADIUSクライアント（prov の中継）
-  - name: policies
-    description: 認可ポリシー（prov の中継）
-  - name: monitoring
-    description: 監査ログとセッションの参照
-  - name: downstream
-    description: 下流の情報の参照（下流の形のまま返す）
-
+  - name: provisioner
+    description: aka-provisioner 自身の口
+  - name: vecgen
+    description: aka-vecgen の管理API の中継
+  - name: radius
+    description: aka-radius の管理API の中継
 paths:
   /status:
-    parameters:
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
     get:
-      tags: [status]
-      summary: provisioner と下流の状態を取得する
+      tags: [provisioner]
+      summary: aka-provisioner と下流の状態
       operationId: getStatus
       description: |
-        下流 2 つの `/status` と、vector-gateway の AVクライアントを確かめて返す。
-        下流や Valkey に接続できなくても 200 を返し、項目ごとの `reachable` と `error` で示す。
+        下流の状態は 30 秒ごとに集めたものを返し、要求のたびには下流を呼ばない。`downstreams[].status` は下流の
+        `/status` の本文を解釈せずにそのまま入れる。Valkey に届かなくても 200 で、`valkey` に誤りを出す。
+      parameters:
+        - $ref: '#/components/parameters/TraceId'
       responses:
         '200':
           description: 状態
@@ -112,285 +72,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Status'
-
-  /subscribers:
-    parameters:
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
+  /audit-logs:
     get:
-      tags: [subscribers]
-      summary: 加入者の一覧を取得する
-      operationId: listSubscribers
-      description: |
-        prov の加入者、aka の加入者、prov の認可ポリシーの 3 つの一覧を、同じ `cursor` と `prefix` で取り寄せ、
-        IMSI の昇順にマージして返す。Ki と OPc は含まない。
-        - aka の加入者は、PLMN マップで `aka` に当たる IMSI だけを対象にする（aka-vecgen には本PoCと関係のない加入者もいるため）。
-        - 鍵だけ、ポリシーだけの IMSI も含める（`issues` で示す）。
-        - 一覧では、`poc` の IMSI について aka 側の加入者は調べない（`KEY_IN_OTHER_STORE` は個別の取得でだけ分かる場合がある）。
-        - 和集合の正確な件数は求めないため、`total` は返さない。
+      tags: [provisioner]
+      summary: aka-provisioner の監査ログ（新しい順）
+      operationId: listAuditLogs
       parameters:
-        - $ref: '#/components/parameters/ImsiPrefix'
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '200':
-          description: 加入者の一覧
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SubscriberList'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '500':
-          $ref: '#/components/responses/InternalError'
-        '502':
-          $ref: '#/components/responses/DownstreamError'
-        '503':
-          $ref: '#/components/responses/DownstreamUnavailable'
-    post:
-      tags: [subscribers]
-      summary: 加入者を作成する
-      operationId: createSubscriber
-      description: |
-        次の順に行う。
-        1. 入力を検証する（下流と同じ規則。ポリシーの規則を含む）。
-        2. prov の加入者、aka の加入者（置き場所が `aka` なら有無、`poc` なら vector-gateway の AVクライアントID を許可しているもの）、
-           prov の認可ポリシーの有無を確かめる。
-           どれかがあれば 409（`SUBSCRIBER_ALREADY_EXISTS`。`conflicts` にある場所）。
-        3. 操作の記録を作り、置き場所に加入者（鍵）を作成する。
-        4. 認可ポリシーを PUT する。
-
-        4 が失敗したら 3 で作った加入者を削除して戻し（補償）、最初の失敗のエラーに `operationId` と `rolledBack: true` を付けて返す。
-        補償も失敗したら 500（`OPERATION_INCOMPLETE`）を返し、後で自動でやり直す（`/operations`）。
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SubscriberCreate'
-            examples:
-              poc:
-                summary: 鍵を本PoCに置く加入者
-                value:
-                  imsi: '001010000000001'
-                  ki: 465b5ce8b199b49faa5f0a2ee238a6bc
-                  opc: cd63cb71954a9f4e48a5994e37a02baf
-                  policy:
-                    default: deny
-                    rules:
-                      - nasId: '*'
-                        allowedSsids: [CORP-WIFI]
-              aka:
-                summary: 鍵を aka-vecgen に置く加入者（PLMN マップで 00102 を 01 にした場合）
-                value:
-                  imsi: '001020000000001'
-                  keyStore: aka
-                  ki: 465b5ce8b199b49faa5f0a2ee238a6bc
-                  opc: cd63cb71954a9f4e48a5994e37a02baf
-                  sqnType: inc32
-                  policy:
-                    default: allow
-                    rules: []
-      responses:
-        '201':
-          description: 作成した加入者。Ki と OPc は含まない。
-          headers:
-            Location:
-              description: 作成した加入者の URI（例 `/admin/v1/subscribers/001010000000001`）
-              schema:
-                type: string
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Subscriber'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '409':
-          $ref: '#/components/responses/SubscriberConflict'
-        '422':
-          $ref: '#/components/responses/IdempotencyKeyMismatch'
-        '500':
-          $ref: '#/components/responses/InternalErrorOrIncomplete'
-        '502':
-          $ref: '#/components/responses/DownstreamError'
-        '503':
-          $ref: '#/components/responses/DownstreamUnavailable'
-
-  /subscribers/{imsi}:
-    parameters:
-      - $ref: '#/components/parameters/Imsi'
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [subscribers]
-      summary: 加入者を取得する
-      operationId: getSubscriber
-      description: |
-        prov の加入者、aka の加入者、prov の認可ポリシーを並行して取得し、まとめて返す。Ki と OPc は含まない。
-        3 か所のどこにもなければ 404。食い違いは `issues` で示す。
-        置き場所でない方の下流にだけ接続できない場合は、`issues` に `OTHER_STORE_UNREACHABLE` を入れて 200 を返す。
-      responses:
-        '200':
-          description: 加入者
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Subscriber'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '404':
-          $ref: '#/components/responses/SubscriberNotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
-        '502':
-          $ref: '#/components/responses/DownstreamError'
-        '503':
-          $ref: '#/components/responses/DownstreamUnavailable'
-    patch:
-      tags: [subscribers]
-      summary: 加入者を変更する
-      operationId: updateSubscriber
-      description: |
-        指定した項目だけを変更する（JSON Merge Patch）。次の順に行う。
-        1. 変更前の認可ポリシーを操作の記録に残す（`policy` を指定したとき）。
-        2. 認可ポリシーを PUT する（`policy` を指定したとき。全体を置き換える）。
-        3. 置き場所の加入者を PATCH する（鍵の項目を指定したとき）。
-
-        3 が失敗したら、2 を変更前に戻し（変更前になければ削除）、最初の失敗のエラーに `operationId` と `rolledBack: true` を付けて返す。
-        戻せなければ 500（`OPERATION_INCOMPLETE`）を返し、後で自動でやり直す。
-
-        - `sqn` を指定しなければ SQN には触れない（認証で進んだ SQN を巻き戻さない）。指定した場合は、そのまま書き換える。
-        - `sqnType` / `allowPlain` は `keyStore` が `aka` の加入者だけに指定できる。許可クライアント（`allowedClientIds`）は変更しない。
-        - 置き場所は変更できない。
-        - 鍵の項目を指定したが置き場所に加入者がない場合は 404（`USER_NOT_FOUND`）。`policy` だけなら、鍵がなくても変更できる。
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/merge-patch+json:
-            schema:
-              $ref: '#/components/schemas/SubscriberUpdate'
-            example:
-              amf: b9b9
-              policy:
-                default: deny
-                rules:
-                  - nasId: AP-OFFICE-01
-                    allowedSsids: [CORP-WIFI]
-                    vlanId: '100'
-      responses:
-        '200':
-          description: 変更後の加入者。Ki と OPc は含まない。
-          headers:
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Subscriber'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '404':
-          $ref: '#/components/responses/SubscriberNotFound'
-        '409':
-          $ref: '#/components/responses/OperationInProgress'
-        '422':
-          $ref: '#/components/responses/IdempotencyKeyMismatch'
-        '500':
-          $ref: '#/components/responses/InternalErrorOrIncomplete'
-        '502':
-          $ref: '#/components/responses/DownstreamError'
-        '503':
-          $ref: '#/components/responses/DownstreamUnavailable'
-    delete:
-      tags: [subscribers]
-      summary: 加入者を削除する
-      operationId: deleteSubscriber
-      description: |
-        認可ポリシー、置き場所の加入者（鍵）の順に削除する（どちらも、既にないものは削除済みとして扱う）。
-        削除は戻せないため、途中で失敗したら 500（`OPERATION_INCOMPLETE`）を返し、残りを後で自動でやり直す。
-        - 置き場所でない方の下流にある同じ IMSI の加入者（`KEY_IN_OTHER_STORE`）は削除しない。
-        - `aka` の加入者は、他の AVクライアントを許可していても、加入者ごと削除する（他の AVクライアントとは共有しない前提）。
-        - 同じ IMSI のセッションは削除しない（本PoCの Provisioning API と同じ）。
-        - 3 か所のどこにもなければ 404。
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '204':
-          description: 削除した
-          headers:
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '404':
-          $ref: '#/components/responses/SubscriberNotFound'
-        '409':
-          $ref: '#/components/responses/OperationInProgress'
-        '422':
-          $ref: '#/components/responses/IdempotencyKeyMismatch'
-        '500':
-          $ref: '#/components/responses/InternalErrorOrIncomplete'
-        '502':
-          $ref: '#/components/responses/DownstreamError'
-        '503':
-          $ref: '#/components/responses/DownstreamUnavailable'
-
-  /subscribers/{imsi}/keys:
-    parameters:
-      - $ref: '#/components/parameters/Imsi'
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [subscribers]
-      summary: 加入者の Ki と OPc を取得する
-      operationId: getSubscriberKeys
-      description: |
-        置き場所の `/subscribers/{imsi}/keys` から取得する。provisioner と置き場所の下流の監査ログに記録する（値は記録しない）。
-      responses:
-        '200':
-          description: Ki と OPc
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SubscriberKeys'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '404':
-          $ref: '#/components/responses/SubscriberNotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
-        '502':
-          $ref: '#/components/responses/DownstreamError'
-        '503':
-          $ref: '#/components/responses/DownstreamUnavailable'
-
-  /operations:
-    parameters:
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [operations]
-      summary: 未解決の操作の一覧を取得する
-      operationId: listOperations
-      description: |
-        状態が `running` / `retrying` / `failed` の操作を、作成の古い順に返す。
-        完了した操作（`completed` / `rolled_back` / `dismissed`）は、保持期間（既定 7 日）のあいだ `/operations/{operationId}` で取得できる。
-      parameters:
-        - name: status
+        - name: before
           in: query
-          description: 状態で絞り込む。
+          description: 前の応答の `nextBefore`。このエントリより古いものを返す。
           schema:
             type: string
-            enum:
-              - running
-              - retrying
-              - failed
+            pattern: '^[0-9]{1,20}-[0-9]{1,20}$'
         - name: limit
           in: query
           schema:
@@ -398,432 +91,7 @@ paths:
             minimum: 1
             maximum: 500
             default: 100
-      responses:
-        '200':
-          description: 未解決の操作
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationList'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /operations/{operationId}:
-    parameters:
-      - $ref: '#/components/parameters/OperationId'
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [operations]
-      summary: 操作を取得する
-      operationId: getOperation
-      responses:
-        '200':
-          description: 操作
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '404':
-          $ref: '#/components/responses/OperationNotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /operations/{operationId}/retry:
-    parameters:
-      - $ref: '#/components/parameters/OperationId'
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    post:
-      tags: [operations]
-      summary: 失敗した操作をやり直す
-      operationId: retryOperation
-      description: |
-        状態が `failed` の操作の続き（作成・変更は補償、削除は残りの削除）を、その場で 1 回行う。
-        成功すれば `rolled_back`（作成・変更）または `completed`（削除）になり、失敗すれば `retrying` に戻って自動のやり直しを再開する
-        （自動のやり直しをやめるまでの 24 時間を、今から数え直す）。
-        本文は送らない。
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '200':
-          description: やり直した後の操作
-          headers:
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '404':
-          $ref: '#/components/responses/OperationNotFound'
-        '409':
-          $ref: '#/components/responses/OperationStateConflict'
-        '422':
-          $ref: '#/components/responses/IdempotencyKeyMismatch'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /operations/{operationId}/dismiss:
-    parameters:
-      - $ref: '#/components/parameters/OperationId'
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    post:
-      tags: [operations]
-      summary: 失敗した操作を閉じる
-      operationId: dismissOperation
-      description: |
-        状態が `retrying` / `failed` の操作を、手で直した後に `dismissed` にして閉じる（自動のやり直しを止める）。
-        下流には何もしない。本文は送らない。
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '200':
-          description: 閉じた操作
-          headers:
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '404':
-          $ref: '#/components/responses/OperationNotFound'
-        '409':
-          $ref: '#/components/responses/OperationStateConflict'
-        '422':
-          $ref: '#/components/responses/IdempotencyKeyMismatch'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /clients:
-    parameters:
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [clients]
-      summary: RADIUSクライアントの一覧を取得する（prov の中継）
-      operationId: listClients
-      description: prov の `GET /clients` を中継する。共有シークレットは含まない。
-      parameters:
-        - name: ip
-          in: query
-          description: IP アドレスで絞り込む。
-          schema:
-            $ref: '#/components/schemas/Ipv4'
-      responses:
-        '200':
-          description: RADIUSクライアントの一覧
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ClientList'
-        default:
-          $ref: '#/components/responses/Relayed'
-    post:
-      tags: [clients]
-      summary: RADIUSクライアントを登録する（prov の中継）
-      operationId: createClient
-      description: prov の `POST /clients` を中継する。`Location` は provisioner のパス（`/admin/v1/clients/{clientId}`）で返す。
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ClientCreate'
-      responses:
-        '201':
-          description: 登録した RADIUSクライアント。共有シークレットは含まない。
-          headers:
-            Location:
-              description: 登録した RADIUSクライアントの URI（例 `/admin/v1/clients/1`）
-              schema:
-                type: string
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Client'
-        default:
-          $ref: '#/components/responses/Relayed'
-
-  /clients/{clientId}:
-    parameters:
-      - $ref: '#/components/parameters/ClientId'
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [clients]
-      summary: RADIUSクライアントを取得する（prov の中継）
-      operationId: getClient
-      responses:
-        '200':
-          description: RADIUSクライアント
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Client'
-        default:
-          $ref: '#/components/responses/Relayed'
-    patch:
-      tags: [clients]
-      summary: RADIUSクライアントを変更する（prov の中継）
-      operationId: updateClient
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/merge-patch+json:
-            schema:
-              $ref: '#/components/schemas/ClientUpdate'
-      responses:
-        '200':
-          description: 変更後の RADIUSクライアント
-          headers:
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Client'
-        default:
-          $ref: '#/components/responses/Relayed'
-    delete:
-      tags: [clients]
-      summary: RADIUSクライアントを削除する（prov の中継）
-      operationId: deleteClient
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '204':
-          description: 削除した
-          headers:
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-        default:
-          $ref: '#/components/responses/Relayed'
-
-  /clients/{clientId}/secret:
-    parameters:
-      - $ref: '#/components/parameters/ClientId'
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [clients]
-      summary: RADIUSクライアントの共有シークレットを取得する（prov の中継）
-      operationId: getClientSecret
-      description: provisioner と prov の監査ログに記録する（値は記録しない）。
-      responses:
-        '200':
-          description: 共有シークレット
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ClientSecret'
-        default:
-          $ref: '#/components/responses/Relayed'
-
-  /policies:
-    parameters:
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [policies]
-      summary: 認可ポリシーの一覧を取得する（prov の中継）
-      operationId: listPolicies
-      parameters:
-        - $ref: '#/components/parameters/ImsiPrefix'
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '200':
-          description: 認可ポリシーの一覧
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PolicyList'
-        default:
-          $ref: '#/components/responses/Relayed'
-
-  /policies/{imsi}:
-    parameters:
-      - $ref: '#/components/parameters/Imsi'
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [policies]
-      summary: 認可ポリシーを取得する（prov の中継）
-      operationId: getPolicy
-      responses:
-        '200':
-          description: 認可ポリシー
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Policy'
-        default:
-          $ref: '#/components/responses/Relayed'
-    put:
-      tags: [policies]
-      summary: 認可ポリシーを作成する、または置き換える（prov の中継）
-      operationId: putPolicy
-      description: |
-        prov の `PUT /policies/{imsi}` を中継する。加入者の操作と同じ IMSI のロックを取る（処理中なら 409 `OPERATION_IN_PROGRESS`）。
-        同じ IMSI に未完了の操作の記録があれば 409（`OPERATION_UNRESOLVED`）。
-        加入者（鍵）の有無は確認しない。`Location`（201）は provisioner のパスで返す。
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/PolicyPut'
-      responses:
-        '200':
-          description: 置き換えた認可ポリシー
-          headers:
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Policy'
-        '201':
-          description: 作成した認可ポリシー
-          headers:
-            Location:
-              description: 作成した認可ポリシーの URI（例 `/admin/v1/policies/001010000000001`）
-              schema:
-                type: string
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Policy'
-        default:
-          $ref: '#/components/responses/Relayed'
-    delete:
-      tags: [policies]
-      summary: 認可ポリシーを削除する（prov の中継）
-      operationId: deletePolicy
-      description: |
-        加入者の操作と同じ IMSI のロックを取る（処理中なら 409 `OPERATION_IN_PROGRESS`）。
-        同じ IMSI に未完了の操作の記録があれば 409（`OPERATION_UNRESOLVED`）。
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '204':
-          description: 削除した
-          headers:
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-        default:
-          $ref: '#/components/responses/Relayed'
-
-  /policies/{imsi}/status:
-    parameters:
-      - $ref: '#/components/parameters/Imsi'
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    put:
-      tags: [policies]
-      summary: 加入者を停止する、または再開する（prov の中継。0.3.0 で追加）
-      operationId: putPolicyStatus
-      description: |
-        prov の `PUT /policies/{imsi}/status` を中継する。`suspended` にすると、本PoCの Auth Server はその加入者の認証を
-        ルールを評価せずに拒否する（鍵の置き場所によらない）。`active` に戻すと再開する。効くのは次の認証からで、
-        接続中のセッションは切れない。
-        - 加入者の操作と同じ IMSI のロックを取る（処理中なら 409 `OPERATION_IN_PROGRESS`）。
-          同じ IMSI に未完了の操作の記録があれば 409（`OPERATION_UNRESOLVED`）。
-        - 本文は検証せずに送る（`status` の検証は prov。前後の空白を除き小文字にしてから検証し、`active` / `suspended`
-          以外は 400）。認可ポリシーがなければ 404（`POLICY_NOT_FOUND`。prov の応答）。
-        - 今と同じ状態への変更も 200。prov はこのとき書き込まず監査ログにも残さないが、provisioner は受け付けた要求として
-          監査ログに残す。
-        - 監査ログの操作は、応答の状態（変更後）が `suspended` なら `policy.suspend`、`active` なら `policy.resume`。
-        - 停止の印は認可ポリシーにあるので、認可ポリシーを削除すると消える（作り直すと `active`）。
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/PolicyStatusPut'
-            example:
-              status: suspended
-      responses:
-        '200':
-          description: 状態を変えた後の認可ポリシー
-          headers:
-            Idempotent-Replayed:
-              $ref: '#/components/headers/IdempotentReplayed'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Policy'
-        default:
-          $ref: '#/components/responses/Relayed'
-
-  /sessions:
-    parameters:
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [monitoring]
-      summary: アクティブセッションを取得する（prov の中継）
-      operationId: listSessions
-      parameters:
-        - name: imsi
-          in: query
-          description: 加入者の IMSI で絞り込む。
-          schema:
-            $ref: '#/components/schemas/Imsi'
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 1000
-            default: 100
-      responses:
-        '200':
-          description: アクティブセッション
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionList'
-        default:
-          $ref: '#/components/responses/Relayed'
-
-  /audit-logs:
-    parameters:
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
-    get:
-      tags: [monitoring]
-      summary: provisioner の監査ログを取得する
-      operationId: listAuditLogs
-      description: |
-        provisioner の監査ログを新しい順に返す。続きを取得するには、応答の `nextBefore` を次の `before` に渡す。
-        件数の上限（`PROVISIONER_AUDIT_MAX`、既定 10000）を超えた古いものは消える。標準出力のログにも同じものが出る。
-      parameters:
-        - $ref: '#/components/parameters/AuditBefore'
-        - $ref: '#/components/parameters/AuditLimit'
+        - $ref: '#/components/parameters/TraceId'
       responses:
         '200':
           description: 監査ログ
@@ -833,82 +101,540 @@ paths:
                 $ref: '#/components/schemas/AuditLogList'
         '400':
           $ref: '#/components/responses/BadRequest'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /prov/audit-logs:
-    parameters:
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
+  /vecgen/status:
     get:
-      tags: [downstream]
-      summary: prov の監査ログを取得する（中継）
-      operationId: listProvAuditLogs
-      description: prov の `GET /audit-logs` を中継する。
+      tags: [vecgen]
+      summary: 下流の GET /status を中継する
+      operationId: vecgenGetStatus
       parameters:
-        - $ref: '#/components/parameters/AuditBefore'
-        - $ref: '#/components/parameters/AuditLimit'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
       responses:
-        '200':
-          description: prov の監査ログ
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProvAuditLogList'
         default:
           $ref: '#/components/responses/Relayed'
-
-  /aka/audit-logs:
-    parameters:
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /vecgen/subscribers:
     get:
-      tags: [downstream]
-      summary: aka の監査ログを取得する（中継）
-      operationId: listAkaAuditLogs
-      description: aka の `GET /audit-logs` を中継する。aka を設定していなければ 404（`DOWNSTREAM_NOT_CONFIGURED`）。
+      tags: [vecgen]
+      summary: 下流の GET /subscribers を中継する
+      operationId: vecgenGetSubscribers
       parameters:
-        - $ref: '#/components/parameters/AuditBefore'
-        - $ref: '#/components/parameters/AuditLimit'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
       responses:
-        '200':
-          description: aka の監査ログ
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AkaAuditLogList'
         default:
           $ref: '#/components/responses/Relayed'
-
-  /aka/av-clients/{clientId}:
-    parameters:
-      - name: clientId
-        in: path
-        required: true
-        description: aka の AVクライアントの ID。
-        schema:
-          type: integer
-          format: int64
-          minimum: 1
-      - $ref: '#/components/parameters/OperatorId'
-      - $ref: '#/components/parameters/TraceId'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+    post:
+      tags: [vecgen]
+      summary: 下流の POST /subscribers を中継する（登録。監査ログ vecgen.subscriber.create）
+      operationId: vecgenPostSubscribers
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Relayed'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyMismatch'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /vecgen/subscribers/batch-get:
+    post:
+      tags: [vecgen]
+      summary: 下流の POST /subscribers/batch-get を中継する
+      operationId: vecgenPostSubscribersBatchGet
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      requestBody:
+        $ref: '#/components/requestBodies/Relayed'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /vecgen/subscribers/{imsi}:
     get:
-      tags: [downstream]
-      summary: aka の AVクライアントを取得する（中継）
-      operationId: getAkaAvClient
-      description: |
-        aka の `GET /clients/{clientId}` を中継する（読み取りだけ）。vector-gateway の AVクライアントの確認に使う。
-        aka を設定していなければ 404（`DOWNSTREAM_NOT_CONFIGURED`）。
+      tags: [vecgen]
+      summary: 下流の GET /subscribers/{imsi} を中継する
+      operationId: vecgenGetSubscribersImsi
+      parameters:
+        - $ref: '#/components/parameters/Imsi'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
       responses:
-        '200':
-          description: AVクライアント
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AkaAvClient'
         default:
           $ref: '#/components/responses/Relayed'
-
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+    patch:
+      tags: [vecgen]
+      summary: 下流の PATCH /subscribers/{imsi} を中継する（変更。監査ログ vecgen.subscriber.update）
+      operationId: vecgenPatchSubscribersImsi
+      parameters:
+        - $ref: '#/components/parameters/Imsi'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Relayed'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyMismatch'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+    delete:
+      tags: [vecgen]
+      summary: 下流の DELETE /subscribers/{imsi} を中継する（物理削除。監査ログ vecgen.subscriber.delete）
+      operationId: vecgenDeleteSubscribersImsi
+      parameters:
+        - $ref: '#/components/parameters/Imsi'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyMismatch'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /vecgen/subscribers/{imsi}/state:
+    put:
+      tags: [vecgen]
+      summary: 下流の PUT /subscribers/{imsi}/state を中継する（状態の変更。監査ログ vecgen.subscriber.state）
+      operationId: vecgenPutSubscribersImsiState
+      parameters:
+        - $ref: '#/components/parameters/Imsi'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Relayed'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyMismatch'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /vecgen/subscribers/{imsi}/reinstate:
+    post:
+      tags: [vecgen]
+      summary: 下流の POST /subscribers/{imsi}/reinstate を中継する（terminated からの戻し。監査ログ vecgen.subscriber.reinstate）
+      operationId: vecgenPostSubscribersImsiReinstate
+      parameters:
+        - $ref: '#/components/parameters/Imsi'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Relayed'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyMismatch'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /vecgen/clients:
+    get:
+      tags: [vecgen]
+      summary: 下流の GET /clients を中継する
+      operationId: vecgenGetClients
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /vecgen/clients/{clientId}:
+    get:
+      tags: [vecgen]
+      summary: 下流の GET /clients/{clientId} を中継する
+      operationId: vecgenGetClientsClientid
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /vecgen/av-server-certificate:
+    get:
+      tags: [vecgen]
+      summary: 下流の GET /av-server-certificate を中継する
+      operationId: vecgenGetAvServerCertificate
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /vecgen/audit-logs:
+    get:
+      tags: [vecgen]
+      summary: 下流の GET /audit-logs を中継する
+      operationId: vecgenGetAuditLogs
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/status:
+    get:
+      tags: [radius]
+      summary: 下流の GET /status を中継する
+      operationId: radiusGetStatus
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/subscribers:
+    get:
+      tags: [radius]
+      summary: 下流の GET /subscribers を中継する
+      operationId: radiusGetSubscribers
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+    post:
+      tags: [radius]
+      summary: 下流の POST /subscribers を中継する（登録。監査ログ radius.subscriber.create）
+      operationId: radiusPostSubscribers
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Relayed'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyMismatch'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/subscribers/batch-get:
+    post:
+      tags: [radius]
+      summary: 下流の POST /subscribers/batch-get を中継する
+      operationId: radiusPostSubscribersBatchGet
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      requestBody:
+        $ref: '#/components/requestBodies/Relayed'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/subscribers/{imsi}:
+    get:
+      tags: [radius]
+      summary: 下流の GET /subscribers/{imsi} を中継する
+      operationId: radiusGetSubscribersImsi
+      parameters:
+        - $ref: '#/components/parameters/Imsi'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+    patch:
+      tags: [radius]
+      summary: 下流の PATCH /subscribers/{imsi} を中継する（変更。監査ログ radius.subscriber.update）
+      operationId: radiusPatchSubscribersImsi
+      parameters:
+        - $ref: '#/components/parameters/Imsi'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Relayed'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyMismatch'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+    delete:
+      tags: [radius]
+      summary: 下流の DELETE /subscribers/{imsi} を中継する（物理削除。監査ログ radius.subscriber.delete）
+      operationId: radiusDeleteSubscribersImsi
+      parameters:
+        - $ref: '#/components/parameters/Imsi'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyMismatch'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/subscribers/{imsi}/state:
+    put:
+      tags: [radius]
+      summary: 下流の PUT /subscribers/{imsi}/state を中継する（状態の変更。監査ログ radius.subscriber.state）
+      operationId: radiusPutSubscribersImsiState
+      parameters:
+        - $ref: '#/components/parameters/Imsi'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Relayed'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyMismatch'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/subscribers/{imsi}/reinstate:
+    post:
+      tags: [radius]
+      summary: 下流の POST /subscribers/{imsi}/reinstate を中継する（terminated からの戻し。監査ログ radius.subscriber.reinstate）
+      operationId: radiusPostSubscribersImsiReinstate
+      parameters:
+        - $ref: '#/components/parameters/Imsi'
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Relayed'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyMismatch'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/sessions:
+    get:
+      tags: [radius]
+      summary: 下流の GET /sessions を中継する
+      operationId: radiusGetSessions
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/usage:
+    get:
+      tags: [radius]
+      summary: 下流の GET /usage を中継する
+      operationId: radiusGetUsage
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/clients:
+    get:
+      tags: [radius]
+      summary: 下流の GET /clients を中継する
+      operationId: radiusGetClients
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/sources:
+    get:
+      tags: [radius]
+      summary: 下流の GET /sources を中継する
+      operationId: radiusGetSources
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
+  /radius/audit-logs:
+    get:
+      tags: [radius]
+      summary: 下流の GET /audit-logs を中継する
+      operationId: radiusGetAuditLogs
+      parameters:
+        - $ref: '#/components/parameters/OperatorId'
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        default:
+          $ref: '#/components/responses/Relayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/DownstreamError'
+        '503':
+          $ref: '#/components/responses/DownstreamUnavailable'
 components:
   parameters:
     Imsi:
@@ -916,61 +642,21 @@ components:
       in: path
       required: true
       schema:
-        $ref: '#/components/schemas/Imsi'
+        type: string
+        pattern: '^[0-9]{5,15}$'
     ClientId:
       name: clientId
       in: path
       required: true
-      description: RADIUSクライアントの ID。
-      schema:
-        $ref: '#/components/schemas/ClientId'
-    OperationId:
-      name: operationId
-      in: path
-      required: true
-      schema:
-        $ref: '#/components/schemas/OperationId'
-    ImsiPrefix:
-      name: prefix
-      in: query
-      description: IMSI の前方一致条件。
-      schema:
-        type: string
-        pattern: '^[0-9]{1,15}$'
-    Cursor:
-      name: cursor
-      in: query
-      description: 前のページの `nextCursor`（IMSI）。省略時は先頭から返す。
-      schema:
-        type: string
-    Limit:
-      name: limit
-      in: query
       schema:
         type: integer
+        format: int64
         minimum: 1
-        maximum: 500
-        default: 50
-    AuditBefore:
-      name: before
-      in: query
-      description: このエントリID より古いものを返す。省略時は最新から返す。
-      schema:
-        type: string
-        pattern: '^[0-9]{1,20}-[0-9]{1,20}$'
-    AuditLimit:
-      name: limit
-      in: query
-      schema:
-        type: integer
-        minimum: 1
-        maximum: 500
-        default: 100
     OperatorId:
       name: X-Operator-Id
       in: header
       required: false
-      description: 操作者 ID。監査ログに記録し、下流にもそのまま渡す。形式が違えば 400（`OPTIONAL_IE_INCORRECT`）。
+      description: 操作者 ID。監査ログに残し、下流に渡す。
       schema:
         type: string
         pattern: '^[A-Za-z0-9._@-]{1,64}$'
@@ -978,1138 +664,75 @@ components:
       name: X-Trace-ID
       in: header
       required: false
-      description: |
-        トレースID。ログ・監査ログ・操作の記録に残し、下流 2 つにも同じ値を渡す。省略時、または形式が違う（印字可能ASCII 1〜64文字でない）場合は
-        provisioner が採番する（16進32桁）。使った値を応答の `X-Trace-ID` ヘッダーで返す（エラーの応答を含む）。
+      description: トレースID。形が違えば採番する。下流に渡し、応答の X-Trace-ID で返す。
       schema:
         type: string
         pattern: '^[\x21-\x7E]{1,64}$'
     IdempotencyKey:
       name: Idempotency-Key
       in: header
-      required: false
-      description: |
-        再送の判定に使うキー（印字可能ASCII 1〜128文字）。同じ管理クライアントから同じキーで届いた要求には、
-        24 時間のあいだ最初の応答を返す。形式が違えば 400（`OPTIONAL_IE_INCORRECT`）。
-        5xx と、一時的な 409（`OPERATION_IN_PROGRESS`、`OPERATION_UNRESOLVED`）の応答は覚えない（同じキーで送り直せる）。
+      required: true
+      description: 再送の判定のキー（印字可能 ASCII 1〜128 文字）。下流を書き換える口では必須。
       schema:
         type: string
         pattern: '^[\x21-\x7E]{1,128}$'
-
-  headers:
-    IdempotentReplayed:
-      description: '`Idempotency-Key` により、以前の応答をそのまま返した場合だけ `true`。'
-      schema:
-        type: string
-        enum:
-          - 'true'
-
+  requestBodies:
+    Relayed:
+      description: 下流の要求の本文（解釈せずにそのまま送る。項目は下流の OpenAPI）。
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
   responses:
+    Relayed:
+      description: 下流の応答をそのまま返す（ProblemDetails には `downstream` を足し、`Location` は aka-provisioner のパスに書き換える）。
+      headers:
+        Idempotent-Replayed:
+          description: 同じ Idempotency-Key の最初の応答を返したとき `true`。
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            type: object
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
     BadRequest:
-      description: |
-        リクエストが不正。`cause` は次のいずれか。項目ごとの理由は `invalidParams` に入る。
-        - `INVALID_MSG_FORMAT`: JSON として解釈できない、Content-Type が違う、未知の項目がある
-        - `INVALID_QUERY_PARAM`: クエリパラメーターの値が不正
-        - `MANDATORY_IE_MISSING`: 必須項目がない
-        - `MANDATORY_IE_INCORRECT`: 必須項目の値が不正（パスの IMSI / ID を含む）
-        - `OPTIONAL_IE_INCORRECT`: 任意項目の値が不正（PATCH の `null`、`X-Operator-Id` / `Idempotency-Key` の形式、
-          `keyStore` が `poc` の加入者への `sqnType` / `allowPlain` を含む）
-        - `KEY_STORE_MISMATCH`: 作成で指定した `keyStore` が、PLMN マップから決まる置き場所と違う（`invalidParams` の `param` は `keyStore`）
-
-        下流が入力の誤りとして断った場合（provisioner の検証をすり抜けた場合）も、下流の `cause` のまま返す。
-        `invalidParams` の `param` は provisioner の項目名に付け替える（例 `rules[0].vlanId` → `policy.rules[0].vlanId`）。
+      description: 要求の形の誤り（`INVALID_MSG_FORMAT`・`INVALID_QUERY_PARAM`・`MANDATORY_IE_MISSING`・`MANDATORY_IE_INCORRECT`・`OPTIONAL_IE_INCORRECT`）。下流が返した 400 もこの形。
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
-    SubscriberNotFound:
-      description: |
-        加入者が存在しない。`cause` は `USER_NOT_FOUND`。
-        - 取得・削除: 3 か所（prov の加入者、aka の加入者、ポリシー）のどこにもない。
-        - 変更: 3 か所のどこにもない、または鍵の項目を指定したが置き場所に加入者がない。
-        - 鍵の取得: 置き場所に加入者がない。
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/ProblemDetails'
-    SubscriberConflict:
-      description: |
-        次のどちらか。
-        - `SUBSCRIBER_ALREADY_EXISTS`: 同じ IMSI のものが既にある。`conflicts` にある場所を入れる
-          （書き込みの途中で下流が 409 を返した場合は、補償したうえで `operationId` と `rolledBack` も付ける）。
-        - `OPERATION_IN_PROGRESS`: 同じ IMSI の操作、または同じ `Idempotency-Key` の要求が処理中。
-        - `OPERATION_UNRESOLVED`: 同じ IMSI に未完了の操作の記録がある。`operationId` にその操作の ID を入れる。
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/ProblemDetails'
-    OperationInProgress:
-      description: |
-        次のどちらか。
-        - `OPERATION_IN_PROGRESS`: 同じ IMSI の操作、または同じ `Idempotency-Key` の要求が処理中。
-        - `OPERATION_UNRESOLVED`: 同じ IMSI に未完了の操作の記録がある。`operationId` にその操作の ID を入れる。
+    Conflict:
+      description: 同じ Idempotency-Key の要求が処理中（`OPERATION_IN_PROGRESS`）。下流が返した 409 もこの形。
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
     IdempotencyKeyMismatch:
-      description: 同じ `Idempotency-Key` で、内容（メソッド・パス・本文）の違う要求が届いた。`cause` は `IDEMPOTENCY_KEY_MISMATCH`。
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/ProblemDetails'
-    OperationNotFound:
-      description: 操作が存在しない（保持期間を過ぎたものを含む）。`cause` は `OPERATION_NOT_FOUND`。
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/ProblemDetails'
-    OperationStateConflict:
-      description: |
-        操作の状態がその処理を受け付けない（`retry` は `failed` だけ、`dismiss` は `retrying` / `failed` だけ）。
-        鍵の変更が反映されたかどうか分からない変更（実行中のまま残り、ワーカーが `failed` にしたもの）は `retry` できない
-        （下流の状態を確かめて直した後に `dismiss` する）。
-        `cause` は `OPERATION_STATE_CONFLICT`。同じ IMSI の操作が処理中なら `OPERATION_IN_PROGRESS`。
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/ProblemDetails'
-    InternalError:
-      description: provisioner 内部のエラー（Valkey のエラー等）。`cause` は `SYSTEM_FAILURE`。
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/ProblemDetails'
-    InternalErrorOrIncomplete:
-      description: |
-        次のどちらか。
-        - `OPERATION_INCOMPLETE`: 下流への書き込みの途中で失敗し、補償（作成・変更）または残りの削除も失敗した。
-          `operationId` を付ける。provisioner が後で自動でやり直す（`/operations/{operationId}`）。
-          `downstream` / `downstreamStatus` / `downstreamCause` は最初の失敗のもの。
-        - `SYSTEM_FAILURE`: provisioner 内部のエラー（Valkey のエラー等）。Valkey に接続できない場合、下流には何もしない。
+      description: 同じ Idempotency-Key で内容が違う（`IDEMPOTENCY_KEY_MISMATCH`）。
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
     DownstreamError:
-      description: |
-        下流が想定外の応答（5xx、ProblemDetails でない応答、呼び出し側では直せない 4xx）を返した。`cause` は `DOWNSTREAM_ERROR`。
-        `downstream`、`downstreamStatus`、分かれば `downstreamCause` を付ける。
-        例: aka が `CLIENT_NOT_FOUND`（設定の `PROVISIONER_AKA_AV_CLIENT_ID` の AVクライアントがない）を返した。
-        書き込みの途中なら、補償したうえで `operationId` と `rolledBack: true` を付ける。
+      description: 下流が ProblemDetails でない誤りを返した（`DOWNSTREAM_ERROR`。`downstreamStatus` に下流の状態コード）。
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
     DownstreamUnavailable:
-      description: |
-        下流に接続できない、またはタイムアウトした。`cause` は `DOWNSTREAM_UNAVAILABLE`。`downstream` を付ける。
-        書き込みの途中なら、補償したうえで `operationId` と `rolledBack: true` を付ける。
-        原因の見当（証明書の不受理、名前解決の失敗など）は、ログと `/status` に出す。
+      description: 下流につながらない・時間内に応答がない（`DOWNSTREAM_UNAVAILABLE`）。
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
-    Relayed:
-      description: |
-        中継のエラー。
-        - 下流が返したエラー（ProblemDetails）は、ステータスと本文をそのまま返す（`downstream` を加える）。
-        - 下流に接続できない場合は 503（`DOWNSTREAM_UNAVAILABLE`）、ProblemDetails でない応答は 502（`DOWNSTREAM_ERROR`）。
-        - `/policies/{imsi}` の PUT / DELETE と `/policies/{imsi}/status` の PUT で同じ IMSI の操作が処理中なら 409（`OPERATION_IN_PROGRESS`）、
-          同じ IMSI に未完了の操作の記録があれば 409（`OPERATION_UNRESOLVED`。`operationId` 付き）。
-        - `Idempotency-Key` の判定は 409（`OPERATION_IN_PROGRESS`）/ 422（`IDEMPOTENCY_KEY_MISMATCH`）。
-        - aka を設定していない場合の `/aka/...` は 404（`DOWNSTREAM_NOT_CONFIGURED`）。
-        - provisioner 内部のエラーは 500（`SYSTEM_FAILURE`）。
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/ProblemDetails'
-
   schemas:
-    # ---- 共通 ----
-
-    Imsi:
-      type: string
-      description: IMSI（数字 15 桁）。
-      pattern: '^[0-9]{15}$'
-      example: '001010000000001'
-
-    Hex128:
-      type: string
-      pattern: '^[A-Fa-f0-9]{32}$'
-
-    Sqn:
-      type: string
-      description: SQN（48bit、16進12桁）。`poc` は Vector API が、`aka` は aka-vecgen が認証のたびに進める。
-      pattern: '^[A-Fa-f0-9]{12}$'
-      example: '000000000020'
-
-    Amf:
-      type: string
-      pattern: '^[A-Fa-f0-9]{4}$'
-      example: '8000'
-
-    SqnType:
-      type: string
-      description: |
-        SQN 増加タイプ（`aka` の加入者だけ。aka-vecgen の管理API と同じ）。
-        - `inc1`: SQN 全体を 1 加算する
-        - `inc32`: SEQ を 1 加算し、IND は維持する
-        - `inc33`: SEQ と IND を 1 ずつ加算する
-      enum:
-        - inc1
-        - inc32
-        - inc33
-
-    KeyStore:
-      type: string
-      description: |
-        鍵（Ki / OPc）の置き場所。
-        - `poc`: 本PoCの Vector API（接続方式 `00`。prov の加入者）
-        - `aka`: aka-vecgen（接続方式 `01`。aka の加入者）
-      enum:
-        - poc
-        - aka
-
-    Downstream:
-      type: string
-      description: |
-        下流の API。
-        - `prov`: 本PoCの Provisioning API
-        - `aka`: aka-vecgen の管理API
-      enum:
-        - prov
-        - aka
-
-    # ---- 加入者 ----
-
-    SubscriberKey:
-      type: object
-      description: 置き場所の加入者の属性（Ki と OPc は含まない）。
-      required:
-        - amf
-        - sqn
-      properties:
-        amf:
-          $ref: '#/components/schemas/Amf'
-        sqn:
-          $ref: '#/components/schemas/Sqn'
-        sqnType:
-          allOf:
-            - $ref: '#/components/schemas/SqnType'
-          description: '`aka` のときだけ。'
-        allowPlain:
-          type: boolean
-          description: 平文HTTP での払い出しを許可するか（`aka` のときだけ）。
-        allowedClientIds:
-          type: array
-          description: 許可クライアントID（`aka` のときだけ。昇順）。
-          items:
-            type: integer
-            format: int64
-        createdAt:
-          type: string
-          format: date-time
-          description: 登録日時。`poc` で値を持たない加入者（古いデータ等）では省略する。
-        updatedAt:
-          type: string
-          format: date-time
-          description: 最終変更日時（`aka` のときだけ。SQN の払い出しでは更新しない）。
-
-    PolicyBody:
-      type: object
-      description: 認可ポリシーの内容（prov の `PolicyPut` と同じ）。
-      required:
-        - default
-        - rules
-      properties:
-        default:
-          $ref: '#/components/schemas/PolicyDefault'
-        rules:
-          type: array
-          description: 先頭から順に評価し、最初に一致したルールを採用する。
-          items:
-            $ref: '#/components/schemas/PolicyRule'
-
-    SubscriberIssue:
-      type: string
-      description: |
-        2 つのノードの状態の食い違い。
-        - `KEY_MISSING`: 置き場所に加入者（鍵）がない
-        - `POLICY_MISSING`: 認可ポリシーがない（本PoCは認証を拒否する）
-        - `KEY_IN_OTHER_STORE`: 置き場所でない方にも同じ IMSI の加入者がある（`poc` では、aka 側の加入者が
-          vector-gateway の AVクライアントID を許可している場合だけ。`aka` では、prov に加入者がある場合）
-        - `AV_CLIENT_NOT_ALLOWED`: `aka` の加入者が、vector-gateway の AVクライアントID を許可していない
-        - `OTHER_STORE_UNREACHABLE`: 置き場所でない方の下流に接続できず、`KEY_IN_OTHER_STORE` を確かめられなかった
-      enum:
-        - KEY_MISSING
-        - POLICY_MISSING
-        - KEY_IN_OTHER_STORE
-        - AV_CLIENT_NOT_ALLOWED
-        - OTHER_STORE_UNREACHABLE
-
-    Subscriber:
-      type: object
-      required:
-        - imsi
-        - keyStore
-        - issues
-      properties:
-        imsi:
-          $ref: '#/components/schemas/Imsi'
-        keyStore:
-          $ref: '#/components/schemas/KeyStore'
-        key:
-          allOf:
-            - $ref: '#/components/schemas/SubscriberKey'
-          description: 置き場所の加入者。ない場合は省略する（`issues` に `KEY_MISSING`）。
-        policy:
-          allOf:
-            - $ref: '#/components/schemas/PolicyBody'
-          description: 認可ポリシー。ない場合は省略する（`issues` に `POLICY_MISSING`）。
-        status:
-          allOf:
-            - $ref: '#/components/schemas/PolicyStatus'
-          description: |
-            加入者の状態（認可ポリシーの `status`。0.3.0 で追加）。認可ポリシーがない場合は省略する。
-            変更は `PUT /policies/{imsi}/status` で行う。
-        issues:
-          type: array
-          description: 食い違い。正常なら空の配列。
-          items:
-            $ref: '#/components/schemas/SubscriberIssue'
-      example:
-        imsi: '001020000000001'
-        keyStore: aka
-        key:
-          amf: '8000'
-          sqn: '000000000020'
-          sqnType: inc32
-          allowPlain: false
-          allowedClientIds: [1]
-          createdAt: '2026-10-10T00:00:00Z'
-          updatedAt: '2026-10-10T00:00:00Z'
-        policy:
-          default: allow
-          rules: []
-        status: active
-        issues: []
-
-    SubscriberCreate:
-      type: object
-      required:
-        - imsi
-        - ki
-        - opc
-        - policy
-      properties:
-        imsi:
-          $ref: '#/components/schemas/Imsi'
-        keyStore:
-          allOf:
-            - $ref: '#/components/schemas/KeyStore'
-          description: 省略すれば PLMN マップから決める。指定した場合、PLMN マップから決まるものと違えば 400（`KEY_STORE_MISMATCH`）。
-        ki:
-          $ref: '#/components/schemas/Hex128'
-        opc:
-          $ref: '#/components/schemas/Hex128'
-        amf:
-          allOf:
-            - $ref: '#/components/schemas/Amf'
-          default: '8000'
-        sqn:
-          allOf:
-            - $ref: '#/components/schemas/Sqn'
-          default: '000000000000'
-        sqnType:
-          allOf:
-            - $ref: '#/components/schemas/SqnType'
-          description: '`aka` のときだけ指定できる。省略時は aka-vecgen の既定（`inc32`）。'
-        allowPlain:
-          type: boolean
-          description: '`aka` のときだけ指定できる。省略時は `false`。'
-        policy:
-          allOf:
-            - $ref: '#/components/schemas/PolicyBody'
-          description: 認可ポリシー。状態（`status`）は指定できず、常に `active` で作る。
-
-    SubscriberUpdate:
-      type: object
-      description: 変更する項目だけを指定する。`null` は指定できない。
-      minProperties: 1
-      properties:
-        ki:
-          $ref: '#/components/schemas/Hex128'
-        opc:
-          $ref: '#/components/schemas/Hex128'
-        amf:
-          $ref: '#/components/schemas/Amf'
-        sqn:
-          $ref: '#/components/schemas/Sqn'
-        sqnType:
-          allOf:
-            - $ref: '#/components/schemas/SqnType'
-          description: '`aka` のときだけ指定できる。'
-        allowPlain:
-          type: boolean
-          description: '`aka` のときだけ指定できる。'
-        policy:
-          allOf:
-            - $ref: '#/components/schemas/PolicyBody'
-          description: |
-            認可ポリシー全体を置き換える（ない場合は作成する）。削除は `DELETE /policies/{imsi}` で行う。
-            状態（`status`）は指定できず、置き換えても変わらない（停止中なら停止のまま）。
-
-    SubscriberKeys:
-      type: object
-      required:
-        - ki
-        - opc
-      properties:
-        ki:
-          $ref: '#/components/schemas/Hex128'
-        opc:
-          $ref: '#/components/schemas/Hex128'
-
-    SubscriberList:
-      type: object
-      required:
-        - items
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Subscriber'
-        nextCursor:
-          type: string
-          description: 次のページがある場合だけ返す（そのページの最後の IMSI）。
-
-    # ---- 操作の記録 ----
-
-    OperationId:
-      type: string
-      format: uuid
-      description: 操作の ID（UUID version 7）。
-      example: 0199c8a2-5b7e-7c3a-9d41-2f6e8a1b3c4d
-
-    OperationKind:
-      type: string
-      enum:
-        - subscriber.create
-        - subscriber.update
-        - subscriber.delete
-
-    OperationStatus:
-      type: string
-      description: |
-        - `running`: 要求を処理中
-        - `completed`: すべての手順が成功した
-        - `rolled_back`: 途中で失敗し、補償で元に戻した
-        - `retrying`: 補償（作成・変更）または残りの削除が失敗し、自動でやり直している
-        - `failed`: やり直しの上限（既定 24 時間）に達した。手での対応が要る
-        - `dismissed`: 手で直した後に閉じた
-      enum:
-        - running
-        - completed
-        - rolled_back
-        - retrying
-        - failed
-        - dismissed
-
-    OperationStep:
-      type: object
-      required:
-        - name
-        - downstream
-        - state
-      properties:
-        name:
-          type: string
-          description: |
-            手順。`subscriber.create`、`subscriber.update`、`subscriber.delete`、`policy.put`、`policy.delete`、
-            `policy.restore`（変更の補償。変更前のポリシーに戻す）、`subscriber.compensate`（作成の補償。作った加入者を消す）。
-          example: policy.put
-        downstream:
-          $ref: '#/components/schemas/Downstream'
-        state:
-          type: string
-          description: |
-            - `pending`: まだ行っていない
-            - `done`: 成功した
-            - `failed`: 失敗した（補償・やり直しの対象）
-            - `compensated`: 補償で元に戻した
-            - `skipped`: 不要だった（指定のない項目、既にないものの削除など）
-          enum:
-            - pending
-            - done
-            - failed
-            - compensated
-            - skipped
-        error:
-          $ref: '#/components/schemas/StepError'
-
-    StepError:
-      type: object
-      description: 手順の最後の失敗。
-      properties:
-        status:
-          type: integer
-          description: 下流の HTTP ステータス（接続できなかった場合は省略）。
-        cause:
-          type: string
-          description: 下流の `cause`、または `DOWNSTREAM_UNAVAILABLE`。
-        detail:
-          type: string
-        time:
-          type: string
-          format: date-time
-
-    Operation:
-      type: object
-      required:
-        - id
-        - kind
-        - imsi
-        - keyStore
-        - status
-        - steps
-        - attempts
-        - operator
-        - mgmtClient
-        - traceId
-        - createdAt
-        - updatedAt
-      properties:
-        id:
-          $ref: '#/components/schemas/OperationId'
-        kind:
-          $ref: '#/components/schemas/OperationKind'
-        imsi:
-          $ref: '#/components/schemas/Imsi'
-        keyStore:
-          $ref: '#/components/schemas/KeyStore'
-        status:
-          $ref: '#/components/schemas/OperationStatus'
-        steps:
-          type: array
-          description: 行う順の手順（補償の手順を含む）。
-          items:
-            $ref: '#/components/schemas/OperationStep'
-        attempts:
-          type: integer
-          description: 補償・やり直しを試みた回数（最初の要求を含まない）。
-        nextAttemptAt:
-          type: string
-          format: date-time
-          description: 次に自動でやり直す時刻（`retrying` のときだけ）。
-        operator:
-          type: string
-          description: 最初の要求の操作者（`X-Operator-Id`。省略された場合は空文字）。
-        mgmtClient:
-          type: string
-          description: 最初の要求の管理クライアントの識別名。
-        traceId:
-          type: string
-          description: 最初の要求のトレースID。下流のログ・監査ログの trace_id と同じ。
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-
-    OperationList:
-      type: object
-      required:
-        - items
-        - total
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Operation'
-        total:
-          type: integer
-          description: 条件に一致する未解決の操作の件数（`items` は `limit` 件まで）。
-
-    # ---- 状態 ----
-
-    DownstreamStatus:
-      type: object
-      required:
-        - configured
-        - reachable
-      properties:
-        configured:
-          type: boolean
-          description: 接続先を設定しているか（aka は `PROVISIONER_AKA_URL` が空なら `false`）。
-        url:
-          type: string
-          description: 接続先のベース URL。
-        reachable:
-          type: boolean
-          description: '`/status` を取得できたか。'
-        version:
-          type: string
-          description: 下流のバージョン（下流の `/status` の `version`）。
-        nodeName:
-          type: string
-          description: ノードの識別名（prov の `nodeName`）。
-        subscriberCount:
-          type: integer
-          description: 下流の加入者数。
-        error:
-          type: string
-          description: 接続できなかった場合のエラー。
-        hint:
-          type: string
-          description: 接続できなかった場合の原因の見当（クライアント証明書の不受理、サーバー証明書の不一致、名前解決の失敗など）。
-
-    Status:
-      type: object
-      required:
-        - version
-        - startedAt
-        - plmnMap
-        - downstreams
-        - avClient
-        - valkey
-        - operations
-      properties:
-        version:
-          type: string
-          description: provisioner のバージョン。
-        startedAt:
-          type: string
-          format: date-time
-        plmnMap:
-          type: array
-          description: PLMN マップ（`PROVISIONER_PLMN_MAP`）。本PoCの `VECTOR_GATEWAY_PLMN_MAP` と目で比べるために返す。
-          items:
-            type: object
-            required:
-              - plmn
-              - keyStore
-            properties:
-              plmn:
-                type: string
-                pattern: '^[0-9]{5,6}$'
-              keyStore:
-                $ref: '#/components/schemas/KeyStore'
-        downstreams:
-          type: object
-          required:
-            - prov
-            - aka
-          properties:
-            prov:
-              $ref: '#/components/schemas/DownstreamStatus'
-            aka:
-              $ref: '#/components/schemas/DownstreamStatus'
-        avClient:
-          type: object
-          description: vector-gateway の AVクライアント（`PROVISIONER_AKA_AV_CLIENT_ID`）の確認結果。aka を設定していなければ `id` 以外を省略する。
-          required:
-            - id
-          properties:
-            id:
-              type: integer
-              format: int64
-              description: 設定の ID（aka を設定していなければ 0）。
-            exists:
-              type: boolean
-            enabled:
-              type: boolean
-            name:
-              type: string
-        valkey:
-          type: object
-          required:
-            - reachable
-          properties:
-            reachable:
-              type: boolean
-            error:
-              type: string
-        operations:
-          type: object
-          description: 未解決の操作の件数（Valkey に接続できなければ省略する）。
-          properties:
-            running:
-              type: integer
-            retrying:
-              type: integer
-            failed:
-              type: integer
-
-    # ---- provisioner の監査ログ ----
-
-    AuditLogEntry:
-      type: object
-      required:
-        - id
-        - time
-        - operator
-        - mgmtClient
-        - action
-        - target
-        - traceId
-        - result
-      properties:
-        id:
-          type: string
-          description: エントリID（Valkey の Stream のID）。`before` に渡せる。
-          example: 1760000000000-0
-        time:
-          type: string
-          format: date-time
-          description: 記録日時（ミリ秒まで）。
-        operator:
-          type: string
-          description: 操作者（`X-Operator-Id`）。省略された操作と、自動のやり直しでは空文字。
-        mgmtClient:
-          type: string
-          description: 管理クライアントの識別名。自動のやり直しでは空文字。
-        action:
-          type: string
-          description: |
-            操作。
-            - 加入者: `subscriber.create` / `subscriber.update` / `subscriber.delete` / `subscriber.keys.read`
-            - 中継: `client.create` / `client.update` / `client.delete` / `client.secret.read`、`policy.create` / `policy.update` / `policy.delete`、
-              `policy.suspend` / `policy.resume`（停止・再開。応答の状態が読めなければ `policy.status.update`）
-            - 操作の記録: `operation.resume`（自動のやり直しの結果）、`operation.retry`、`operation.dismiss`
-          example: subscriber.create
-        target:
-          type: string
-          description: 対象。加入者・認可ポリシーは IMSI、RADIUSクライアントは ID、操作の記録は操作の ID。
-          example: '001010000000001'
-        traceId:
-          type: string
-          description: トレースID。下流のログ・監査ログの trace_id と同じ。
-        operationId:
-          allOf:
-            - $ref: '#/components/schemas/OperationId'
-          description: 操作の記録の ID（加入者の作成・変更・削除と、操作の記録への操作のとき）。
-        result:
-          type: string
-          description: |
-            結果。成功した操作は `completed`。加入者の作成・変更・削除で書き込みの途中で失敗した場合は、
-            `rolled_back` / `retrying` / `failed`。
-          enum:
-            - completed
-            - rolled_back
-            - retrying
-            - failed
-            - dismissed
-        details:
-          type: object
-          description: 変更内容と下流ごとの結果（秘密の値は含まない。Ki / OPc は変更の有無だけ）。ない場合は省略する。
-          additionalProperties: true
-
-    AuditLogList:
-      type: object
-      required:
-        - items
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/AuditLogEntry'
-        nextBefore:
-          type: string
-          description: さらに古いエントリがある場合だけ返す。
-
-    # ---- 以下は prov（Provisioning API 0.4.0）と同じ形 ----
-
-    Ipv4:
-      type: string
-      format: ipv4
-      description: IPv4 アドレス（ドット区切りの10進。各オクテットの先頭に 0 を付けない）。
-      example: 192.168.10.1
-
-    ClientId:
-      type: integer
-      format: int64
-      minimum: 1
-      description: prov が採番する ID（1 からの連番。再利用しない）。
-      example: 1
-
-    ClientSecretValue:
-      type: string
-      description: 共有シークレット。印字可能ASCII（空白を除く）1〜128文字。
-      pattern: '^[\x21-\x7E]{1,128}$'
-
-    ClientName:
-      type: string
-      pattern: '^[A-Za-z0-9_-]{1,64}$'
-
-    ClientVendor:
-      type: string
-      pattern: '^[A-Za-z0-9 -]{0,64}$'
-
-    Client:
-      type: object
-      required:
-        - id
-        - ip
-        - name
-        - vendor
-      properties:
-        id:
-          $ref: '#/components/schemas/ClientId'
-        ip:
-          $ref: '#/components/schemas/Ipv4'
-        name:
-          $ref: '#/components/schemas/ClientName'
-        vendor:
-          $ref: '#/components/schemas/ClientVendor'
-
-    ClientCreate:
-      type: object
-      required:
-        - ip
-        - secret
-        - name
-      properties:
-        ip:
-          $ref: '#/components/schemas/Ipv4'
-        secret:
-          $ref: '#/components/schemas/ClientSecretValue'
-        name:
-          $ref: '#/components/schemas/ClientName'
-        vendor:
-          allOf:
-            - $ref: '#/components/schemas/ClientVendor'
-          default: ''
-
-    ClientUpdate:
-      type: object
-      description: 変更する項目だけを指定する。`null` は指定できない。
-      minProperties: 1
-      properties:
-        ip:
-          $ref: '#/components/schemas/Ipv4'
-        secret:
-          $ref: '#/components/schemas/ClientSecretValue'
-        name:
-          $ref: '#/components/schemas/ClientName'
-        vendor:
-          $ref: '#/components/schemas/ClientVendor'
-
-    ClientSecret:
-      type: object
-      required:
-        - secret
-      properties:
-        secret:
-          $ref: '#/components/schemas/ClientSecretValue'
-
-    ClientList:
-      type: object
-      required:
-        - items
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Client'
-
-    PolicyDefault:
-      type: string
-      enum:
-        - allow
-        - deny
-
-    PolicyRule:
-      type: object
-      required:
-        - nasId
-        - allowedSsids
-      properties:
-        nasId:
-          type: string
-          description: NAS-Identifier（印字可能ASCII 1〜253文字）。`*` 単独は任意の NAS に一致する。それ以外は完全一致。
-          pattern: '^[\x21-\x7E]{1,253}$'
-        allowedSsids:
-          type: array
-          description: 許可する SSID（1〜32バイト）。`*` は任意の SSID に一致する。比較は大文字小文字を区別しない。
-          minItems: 1
-          items:
-            type: string
-            minLength: 1
-            maxLength: 32
-        vlanId:
-          type: string
-          description: 割り当てる VLAN ID（0〜4094。数字だけ）。省略・空文字は未設定。
-          pattern: '^[0-9]{0,4}$'
-        sessionTimeout:
-          type: integer
-          description: Session-Timeout（秒）。省略・0 は未設定。
-          minimum: 0
-          maximum: 86400
-
-    Policy:
-      type: object
-      required:
-        - imsi
-        - default
-        - rules
-        - status
-      properties:
-        imsi:
-          $ref: '#/components/schemas/Imsi'
-        default:
-          $ref: '#/components/schemas/PolicyDefault'
-        rules:
-          type: array
-          items:
-            $ref: '#/components/schemas/PolicyRule'
-        status:
-          $ref: '#/components/schemas/PolicyStatus'
-
-    PolicyStatus:
-      type: string
-      description: |
-        加入者の状態（prov 0.4.0 から）。`active` は利用中、`suspended` は停止中（本PoCの Auth Server が認証を拒否する）。
-        prov は Valkey にフィールドがなければ `active` を返し、Valkey を直接書き換えた不正な値はそのまま返す
-        （Auth Server は拒否する。`PUT /policies/{imsi}/status` で正しい値に戻せる）。provisioner も値をそのまま返す。
-      enum:
-        - active
-        - suspended
-
-    PolicyStatusPut:
-      type: object
-      required:
-        - status
-      properties:
-        status:
-          $ref: '#/components/schemas/PolicyStatus'
-
-    PolicyPut:
-      type: object
-      required:
-        - default
-        - rules
-      properties:
-        default:
-          $ref: '#/components/schemas/PolicyDefault'
-        rules:
-          type: array
-          items:
-            $ref: '#/components/schemas/PolicyRule'
-
-    PolicyList:
-      type: object
-      required:
-        - items
-        - total
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Policy'
-        total:
-          type: integer
-          description: '`prefix` に一致する認可ポリシーの総数。'
-        nextCursor:
-          type: string
-          description: 次のページがある場合だけ返す。
-
-    Session:
-      type: object
-      required:
-        - id
-        - imsi
-        - nasIp
-        - nasIdentifier
-        - clientIp
-        - acctSessionId
-        - inputOctets
-        - outputOctets
-      properties:
-        id:
-          type: string
-          description: セッションの UUID（RADIUS の Class 属性の値）。
-        imsi:
-          $ref: '#/components/schemas/Imsi'
-        nasIp:
-          type: string
-        nasIdentifier:
-          type: string
-        startTime:
-          type: string
-          format: date-time
-        clientIp:
-          type: string
-        acctSessionId:
-          type: string
-        inputOctets:
-          type: integer
-          format: int64
-        outputOctets:
-          type: integer
-          format: int64
-
-    SessionList:
-      type: object
-      required:
-        - items
-        - total
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Session'
-        total:
-          type: integer
-
-    ProvAuditLogEntry:
-      type: object
-      description: prov の監査ログの 1 件（Provisioning API の `AuditLogEntry`）。
-      required:
-        - id
-        - time
-        - operator
-        - mgmtClient
-        - action
-        - target
-        - targetKey
-        - traceId
-      properties:
-        id:
-          type: string
-        time:
-          type: string
-          format: date-time
-        operator:
-          type: string
-        mgmtClient:
-          type: string
-          description: provisioner を通した操作では、prov に登録した provisioner の識別名。
-        action:
-          type: string
-        target:
-          type: string
-        targetKey:
-          type: string
-        traceId:
-          type: string
-        details:
-          type: string
-
-    ProvAuditLogList:
-      type: object
-      required:
-        - items
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/ProvAuditLogEntry'
-        nextBefore:
-          type: string
-
-    # ---- 以下は aka（aka-vecgen 管理API 0.2.0）と同じ形 ----
-
-    AkaAuditLogEntry:
-      type: object
-      description: aka の監査ログの 1 件（aka-vecgen 管理API の `AuditLogEntry`）。
-      required:
-        - id
-        - time
-        - operator
-        - mgmtClient
-        - action
-        - target
-        - traceId
-      properties:
-        id:
-          type: string
-        time:
-          type: string
-          format: date-time
-        operator:
-          type: string
-        mgmtClient:
-          type: string
-          description: provisioner を通した操作では、aka に登録した provisioner の識別名。
-        action:
-          type: string
-        target:
-          type: string
-        traceId:
-          type: string
-        detail:
-          type: object
-          additionalProperties: true
-
-    AkaAuditLogList:
-      type: object
-      required:
-        - items
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/AkaAuditLogEntry'
-        nextBefore:
-          type: string
-
-    AkaAvClient:
-      type: object
-      description: aka の AVクライアント（aka-vecgen 管理API の `Client`）。
-      required:
-        - id
-        - name
-        - certPem
-        - fingerprintSha256
-        - subject
-        - notBefore
-        - notAfter
-        - enabled
-        - networkName
-        - createdAt
-      properties:
-        id:
-          type: integer
-          format: int64
-        name:
-          type: string
-        certPem:
-          type: string
-        fingerprintSha256:
-          type: string
-        subject:
-          type: string
-        notBefore:
-          type: string
-          format: date-time
-        notAfter:
-          type: string
-          format: date-time
-        enabled:
-          type: boolean
-        networkName:
-          type: string
-        createdAt:
-          type: string
-          format: date-time
-
-    # ---- エラー ----
-
-    InvalidParam:
-      type: object
-      required:
-        - param
-      properties:
-        param:
-          type: string
-          description: 不正だった項目の名前（例 `policy.rules[0].nasId`）。
-        reason:
-          type: string
-
     ProblemDetails:
       type: object
+      required: [title, status]
       properties:
         title:
           type: string
@@ -2120,64 +743,120 @@ components:
         cause:
           type: string
           description: |
-            下流と同じ値（`INVALID_MSG_FORMAT`、`USER_NOT_FOUND` 等）に、provisioner の値を加える。
-            中継では、下流が返した値をそのまま返す（下の一覧にない値もありうる）。
-          enum:
-            - INVALID_MSG_FORMAT
-            - INVALID_QUERY_PARAM
-            - MANDATORY_IE_MISSING
-            - MANDATORY_IE_INCORRECT
-            - OPTIONAL_IE_INCORRECT
-            - USER_NOT_FOUND
-            - CLIENT_NOT_FOUND
-            - POLICY_NOT_FOUND
-            - SUBSCRIBER_ALREADY_EXISTS
-            - CLIENT_ALREADY_EXISTS
-            - SYSTEM_FAILURE
-            - KEY_STORE_MISMATCH
-            - OPERATION_IN_PROGRESS
-            - OPERATION_UNRESOLVED
-            - IDEMPOTENCY_KEY_MISMATCH
-            - OPERATION_NOT_FOUND
-            - OPERATION_STATE_CONFLICT
-            - OPERATION_INCOMPLETE
-            - DOWNSTREAM_ERROR
-            - DOWNSTREAM_UNAVAILABLE
-            - DOWNSTREAM_NOT_CONFIGURED
+            aka-provisioner の誤りは INVALID_MSG_FORMAT、INVALID_QUERY_PARAM、MANDATORY_IE_MISSING、MANDATORY_IE_INCORRECT、
+            OPTIONAL_IE_INCORRECT、ROUTE_NOT_ALLOWED、OPERATION_IN_PROGRESS、IDEMPOTENCY_KEY_MISMATCH、DOWNSTREAM_ERROR、
+            DOWNSTREAM_UNAVAILABLE、SYSTEM_FAILURE。下流の誤りは下流の cause のまま。
         invalidParams:
           type: array
-          minItems: 1
           items:
-            $ref: '#/components/schemas/InvalidParam'
+            type: object
+            properties:
+              param:
+                type: string
+              reason:
+                type: string
         downstream:
-          allOf:
-            - $ref: '#/components/schemas/Downstream'
-          description: エラーの元の下流（下流の応答や接続に由来する場合）。
+          type: string
+          enum: [vecgen, radius]
         downstreamStatus:
           type: integer
-          description: 下流の HTTP ステータス（`DOWNSTREAM_ERROR`、`OPERATION_INCOMPLETE` のとき）。
-        downstreamCause:
+    Certificate:
+      type: object
+      properties:
+        subject:
           type: string
-          description: 下流の `cause`（分かる場合）。
-        operationId:
-          allOf:
-            - $ref: '#/components/schemas/OperationId'
-          description: |
-            操作の記録の ID。加入者の作成・変更・削除で、下流への書き込みを始めた後に失敗した場合はその操作。
-            `OPERATION_UNRESOLVED` では、同じ IMSI の未完了の操作。
-        rolledBack:
-          type: boolean
-          description: 補償で元に戻したか（`operationId` を返す場合だけ）。
-        conflicts:
+        notAfter:
+          type: string
+          format: date-time
+        fingerprint:
+          type: string
+          description: SHA-256（16進小文字）
+    Status:
+      type: object
+      required: [version, startedAt, valkey, adminClients, adminClientsLoadedAt, downstreamsLoadedAt, clientCertificate, serverCertificate, downstreams]
+      properties:
+        version:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        valkey:
+          type: object
+          properties:
+            reachable:
+              type: boolean
+            error:
+              type: string
+        adminClients:
           type: array
-          description: |
-            `SUBSCRIBER_ALREADY_EXISTS` で、同じ IMSI のものがあった場所。
-            - `poc`: prov の加入者
-            - `aka`: aka の加入者（vector-gateway の AVクライアントID を許可しているもの、または置き場所が `aka` のとき）
-            - `policy`: prov の認可ポリシー
           items:
             type: string
-            enum:
-              - poc
-              - aka
-              - policy
+          description: 管理クライアントの識別名
+        adminClientsLoadedAt:
+          type: string
+          format: date-time
+        downstreamsLoadedAt:
+          type: string
+          format: date-time
+        clientCertificate:
+          $ref: '#/components/schemas/Certificate'
+        serverCertificate:
+          $ref: '#/components/schemas/Certificate'
+        downstreams:
+          type: array
+          items:
+            type: object
+            required: [name, url, serverCertificate, reachable]
+            properties:
+              name:
+                type: string
+                enum: [vecgen, radius]
+              url:
+                type: string
+              serverCertificate:
+                $ref: '#/components/schemas/Certificate'
+              reachable:
+                type: boolean
+              checkedAt:
+                type: string
+                format: date-time
+              error:
+                type: string
+              hint:
+                type: string
+              status:
+                type: object
+                description: 下流の /status の本文（解釈せずにそのまま）
+    AuditLogList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, time, operator, mgmtClient, action, target, traceId]
+            properties:
+              id:
+                type: string
+              time:
+                type: string
+                format: date-time
+              operator:
+                type: string
+              mgmtClient:
+                type: string
+              action:
+                type: string
+                example: vecgen.subscriber.create
+              target:
+                type: string
+              detail:
+                type: object
+                example:
+                  downstream: vecgen
+                  fields: [imsi, ki, opc, state]
+              traceId:
+                type: string
+        nextBefore:
+          type: string

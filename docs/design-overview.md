@@ -1,7 +1,7 @@
 # aka-provisioner 設計概要（下書き）
 
 - 作成日: 2026-10-26
-- 状態: 下書き。§16 の確認事項は 2026-10-26 にすべて推奨案で合意した（§3.2 の決定事項 1〜8）。
+- 状態: 下書き。§16 の確認事項は 2026-10-26 にすべて推奨案で合意した（§3.2 の決定事項 1〜8）。段階 3-1 を終えた（2026-10-30。§14 の「段階 3-1 で決めたこと」）。
 - 置き場所: 2026-10-27（MVP セットの段階 1）に、aka-mvpset の `docs/nodes/aka-provisioner.md` から本リポジトリの `docs/design-overview.md` に移した。
 - 対象: 管理面の中継のノード aka-provisioner（もとは eapaka-node-provisioner。以下「もとの実装」）。
 - 関連:
@@ -128,15 +128,15 @@
 
 ### 8.1 ファイル
 
-下流の登録簿をファイル（`PROVISIONER_DOWNSTREAMS_FILE`。JSON）に置き、`SIGHUP` で読み直す（§16 の D4）。
+下流の登録簿をファイル（`PROVISIONER_DOWNSTREAMS_FILE`。JSON）に置き、`SIGHUP` で読み直す（§16 の D4）。登録簿と証明書はディレクトリ `downstreams/` ごと読み取り専用でマウントし、パスは登録簿のファイルからの相対で書ける（段階 3-1 の U5。`ca`・`edges` は段階 4-2 で足す）。
 
 ```json
 {
-  "clientCert": "/run/secrets/client.pem",
-  "clientKey": "/run/secrets/client.key",
-  "vecgen": { "url": "https://10.x.x.x:9443/admin/v2", "serverCert": "/run/secrets/vecgen-admin.pem" },
-  "radius": { "url": "https://10.x.x.x:9444/admin/v2", "serverCert": "/run/secrets/radius-admin.pem" },
-  "ca":     { "url": "https://radsec-ca:9448", "serverCert": "/run/secrets/ca-admin.pem" },
+  "clientCert": "client.pem",
+  "clientKey": "client.pem",
+  "vecgen": { "url": "https://10.x.x.x:9443/admin/v2", "serverCert": "vecgen-admin.pem" },
+  "radius": { "url": "https://10.x.x.x:9444/admin/v2", "serverCert": "radius-admin.pem" },
+  "ca":     { "url": "https://radsec-ca:9448", "serverCert": "ca-admin.pem" },
   "edges": [
     { "id": "edge-01", "url": "https://10.x.x.x:9447", "serverFingerprint": "…" }
   ]
@@ -178,10 +178,11 @@
 | `PROVISIONER_ADDR` | 待ち受け | `:9446` |
 | `PROVISIONER_TLS_CERT` / `_TLS_KEY` / `_TLS_HOSTS` | サーバー証明書（なければ自己署名を作る） | もとのまま |
 | `PROVISIONER_ADMIN_CLIENTS_FILE` | 管理クライアントのピンのファイル | `/run/secrets/admin-clients` |
-| `PROVISIONER_DOWNSTREAMS_FILE` | 下流の登録簿のファイル（§8.1） | `/run/secrets/downstreams.json` |
+| `PROVISIONER_DOWNSTREAMS_FILE` | 下流の登録簿のファイル（§8.1） | `/etc/aka-provisioner/downstreams/downstreams.json`（段階 3-1 の U5） |
 | `PROVISIONER_DOWNSTREAM_TIMEOUT` | 下流の 1 回の呼び出しのタイムアウト | `5s` |
 | `PROVISIONER_VALKEY_ADDR` / `_VALKEY_PASSWORD` | 専用の Valkey | もとのまま |
-| `PROVISIONER_AUDIT_MAX` / `PROVISIONER_AUDIT_DIR` | 監査ログの Stream の上限、JSONL の書き出し先 | `100000` / `/data/audit` |
+| `PROVISIONER_AUDIT_MAX` / `PROVISIONER_AUDIT_DIR` / `PROVISIONER_AUDIT_RETENTION_DAYS` | 監査ログの Stream の上限、JSONL の書き出し先、持つ日数 | `100000` / `/data/audit` / `14` |
+| `PROVISIONER_HEALTH_ADDR` | ループバックの healthcheck の口（段階 3-1 の U9） | `127.0.0.1:9090` |
 | `PROVISIONER_LOG_LEVEL` | ログの段階 | `info` |
 
 - なくす: `PROVISIONER_ADMIN_CLIENTS`（ファイルへ）、`PROVISIONER_CLIENT_CERT` / `_CLIENT_KEY`・`_PROV_URL`・`_AKA_URL` などの下流ごとの変数（登録簿へ）、`PROVISIONER_PLMN_MAP`、`PROVISIONER_AKA_AV_CLIENT_ID`。
@@ -206,11 +207,26 @@
 | 段階 | 内容 | 終わりの確かめ |
 |---|---|---|
 | 1 | リポジトリ `aka-provisioner` を作り、eapaka-node-provisioner の履歴ごと移す。改名だけ | 今の CI が通る |
-| 3-1 | 統合操作・操作の記録・ワーカー・ロック・PLMN マップ・型つきのクライアントをなくし、口の一覧つきの中継（`/admin/v2/vecgen/...`、`/radius/...`）にする。`Idempotency-Key` の必須化、登録簿とピンのファイル、監査ログの書き出し、`/status` | 単体、aka-vecgen・aka-radius との契約の試験 |
+| 3-1 | 統合操作・操作の記録・ワーカー・ロック・PLMN マップ・型つきのクライアントをなくし、口の一覧つきの中継（`/admin/v2/vecgen/...`、`/radius/...`）にする。`Idempotency-Key` の必須化、登録簿とピンのファイル、監査ログの書き出し、`/status` | 単体、aka-vecgen・aka-radius との契約の試験。**済み（2026-10-30）**: 下の「段階 3-1 で決めたこと」 |
 | 3-2 | 運用ガイド（クライアント証明書の入れ替え、エッジの足し方） | 手元の compose |
 | 4-2 | radsec-ca とエッジの中継を足す（radsec-edge §23.1 の 4-2） | 契約の試験（エッジと radsec-ca を CI で起動） |
 
 - 段階 3-1 は aka-vecgen・aka-radius の管理API 2.0.0（それぞれの段階 2）の後に行う。
+
+段階 3-1 で決めたこと（2026-10-30。aka-mvpset の概要 §18.7 の段階 3 の進め方 Q1〜Q10 と、確認事項 U1〜U11 はすべて推奨案で合意）:
+
+- U1: 1 つの手順にし、中ではコミットを分けた。
+- U2: 許す口は、aka-vecgen は OpenAPI の 14 の口のうち `GET /subscribers/{imsi}/keys` を除く 13（§6.2 の表になかった `GET /clients/{clientId}` を含む）、aka-radius は 14 の口すべて。`POST /subscribers/batch-get` は読み出しとして扱い、`Idempotency-Key` を求めず監査ログにも残さない。一覧にない口は、メソッドが違うだけでも 404（`ROUTE_NOT_ALLOWED`。ログの `RELAY_DENIED`）。パスの値は、IMSI を 5〜15 桁の数字（aka-vecgen の形。aka-radius の 15 桁は下流が確かめる）、`clientId` を 1 以上の整数として確かめる。
+- U3: 口の一覧（`internal/api/routes.go` の allowlist と denylist）と、固定のコミットの下流の OpenAPI の口が同じであることを確かめる試験（`TestAllowlistMatchesOpenAPI`）を足した。YAML は外部の部品を使わず、`paths` の字下げで読む。CI の契約の試験のジョブで流す。
+- U4: 契約の試験は、aka-vecgen・aka-radius を `versions.env` の固定のコミット（`2d48379`・`ac2f05a`）からバイナリでビルドし、`scripts/contract.sh` でループバックに起動する（Valkey は 3 つとも Docker のコンテナ。手元と CI で同じスクリプト）。試験（`internal/contract`）は、許す口をすべて aka-provisioner を通して呼び、状態コード、`Location` の書き換え、`Idempotency-Key` の再送と食い違い、鍵の読み出しと RADIUS クライアントの書き込みの拒否、下流の誤りの `downstream`、操作者とトレースID が下流と aka-provisioner の監査ログに残ることを確かめる。
+- U5: 下流の登録簿は §8.1 のとおり（3-1 は `vecgen`・`radius` だけで、知らない項目と後ろに続くデータは誤り。url は https で、パスが `/admin/v2`）。読み直したら、次の要求から新しいクライアントを使い、前のクライアントの待機中の接続を閉じる。
+- U6: ピンのファイルは aka-vecgen・aka-radius と同じ形（aka-radius の `internal/admin/auth` を写した `internal/server/pins.go`）。1 つもないファイルでは起動しない。`SIGHUP` でピン・登録簿・サーバー証明書を読み直す（もとの実装の、1 分ごとにサーバー証明書のファイルを見る作りはやめた）。拒否した接続はログの `ADMIN_CLIENT_REJECTED`（理由、フィンガープリント、送信元）。`gen-client-cert` は下流のピンのファイルに書く 1 行を出す。
+- U7: 監査ログは、書き込みの中継が 2xx のときだけ残す。`action` は `<下流>.subscriber.create`・`.update`・`.state`・`.reinstate`・`.delete`、`target` は IMSI（登録は本文の `imsi`）、`detail` は `{"downstream":…,"fields":[本文の項目の名前]}`（値は残さない）。Stream の項目と日ごとのファイルは aka-radius の `internal/audit` と同じ形・同じ作り（`files.go` を写した）。もとの `operation_id`・`result` の項目はなくした。
+- U8: `/status` は、版・起動日時・Valkey・管理クライアントと読み直しの日時・登録簿の読み直しの日時・クライアント証明書とサーバー証明書（主体名・期限・フィンガープリント）と、下流ごとの状態（url、サーバー証明書、つながるか、確かめた時刻、誤りと原因の見当、下流の `/status` の本文をそのまま）。下流の `/status` は起動のときと 30 秒ごと、登録簿を読み直したときに集める。つながらなくなったとき（`DOWNSTREAM_UNREACHABLE`）とまたつながったとき（`DOWNSTREAM_REACHABLE`）だけログを出す。
+- U9: healthcheck は aka-radius の `internal/health` を写した、ループバックの `GET /healthz`（専用の Valkey の PING）。
+- U10: compose に管理面の Fluent Bit を置いた（`configs/fluent-bit/fluent-bit.yaml`。aka-provisioner と Valkey のほか、aka-ossbss・その PostgreSQL・cloudflared のタグも先に書いた）。同じホストで aka-radius の Fluent Bit と並べて試すときのために、ホストのポートを `PROVISIONER_FLUENT_BIT_PORT` で変えられる。同じホストで試す重ね合わせは `compose.aka-radius-admin.yaml`（`compose.eapaka-prov.yaml` を改めた）と `compose.aka-av.yaml`。下流の登録簿と証明書は `downstreams/`、監査ログのファイルは `audit/` をマウントする。
+- U11: OpenAPI を 2.0.0 に書き直した（自分の口、中継の口の一覧と作法、エラー。下流の項目は写さない）。README を今の作りに直した。運用ガイドの書き直しと `docs/poc/` の削除は 3-5。
+- そのほか: 要求の本文の上限は 1 MiB、下流のタイムアウトの上限は 30 秒（もとの 10 秒の上限はロックとの兼ね合いだったので改めた）、`Idempotency-Key` の処理中の記録の期限は 60 秒。接続ごとの TLS 設定で HTTP/2 が落ちないよう ALPN を入れた。ログの `event_id`: `STARTING`、`*_LOADED`・`*_LOAD_ERR`・`*_RELOADED`・`*_RELOAD_ERR`（`ADMIN_CLIENTS`・`DOWNSTREAMS`・`SERVER_CERT`）、`VALKEY_CONN_ERR`、`AUDIT_DIR_ERR`、`SYS_LISTEN_ERR`、`ADMIN_REQUEST`、`ADMIN_CLIENT_REJECTED`、`RELAY_DENIED`、`DOWNSTREAM_UNREACHABLE`・`DOWNSTREAM_REACHABLE`、`DOWNSTREAM_ERROR`、`IDEMPOTENT_REPLAYED`、`AUDIT`・`AUDIT_WRITE_ERR`・`AUDIT_MAINTAIN_ERR`、`SYSTEM_ERROR`。
 
 ## 15. 他の文書への反映
 
