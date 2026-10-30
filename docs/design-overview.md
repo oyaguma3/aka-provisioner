@@ -1,14 +1,15 @@
 # aka-provisioner 設計概要（下書き）
 
 - 作成日: 2026-10-26
-- 状態: 下書き。§16 の確認事項は 2026-10-26 にすべて推奨案で合意した（§3.2 の決定事項 1〜8）。段階 3-1 を終えた（2026-10-30。§14 の「段階 3-1 で決めたこと」）。
+- 状態: 下書き。§16 の確認事項は 2026-10-26 にすべて推奨案で合意した（§3.2 の決定事項 1〜8）。段階 3-1 と 3-5 を終えた（2026-10-30・31。§14 の「段階 3-1 で決めたこと」「段階 3-5 で決めたこと」）。radsec-ca とエッジの中継は段階 4-2。
 - 置き場所: 2026-10-27（MVP セットの段階 1）に、aka-mvpset の `docs/nodes/aka-provisioner.md` から本リポジトリの `docs/design-overview.md` に移した。
 - 対象: 管理面の中継のノード aka-provisioner（もとは eapaka-node-provisioner。以下「もとの実装」）。
 - 関連:
   - aka-mvpset の[要件と構成の概要](https://github.com/oyaguma3/aka-mvpset/blob/main/docs/requirements-overview.md)（以下「概要」）: §5（配置）、§6.4（台帳と変更の経路）、§10（一括投入）、§12（鍵の経路、管理用の mTLS のピン）、§13（ログ）、§17.1（改修）
   - 課金レコード: [charging-records.md](https://github.com/oyaguma3/aka-mvpset/blob/main/docs/charging-records.md) §8.1（利用の集計の中継）
   - 下流の設計概要: [aka-vecgen](https://github.com/oyaguma3/aka-vecgen/blob/main/docs/design-overview.md)、[aka-radius](https://github.com/oyaguma3/aka-radius/blob/main/docs/design-overview.md)、radsec-ca の `docs/design-overview.md` §9、radsec-edge の `docs/design-overview.md` §12.1・§15・§23（段階 4）
-  - もとの実装: eapaka-node-provisioner。今の作りは本リポジトリの [`docs/poc/design-overview.md`](poc/design-overview.md)（以下「もとの設計概要」）と `docs/openapi/provisioner-api.yaml`（0.3.0）
+  - もとの実装: eapaka-node-provisioner（`0ca238d`、`pocset-v1.0.1`）の[設計概要](https://github.com/oyaguma3/eapaka-node-provisioner/blob/0ca238deb1181e2b9a85b514d9f3894ef93ba85c/docs/design-overview.md)（以下「もとの設計概要」）と [API 仕様](https://github.com/oyaguma3/eapaka-node-provisioner/blob/0ca238deb1181e2b9a85b514d9f3894ef93ba85c/docs/openapi/provisioner-api.yaml)（0.3.0）
+  - 本リポジトリにあったもとの実装の設計概要の写し（`docs/poc/design-overview.md`）は、段階 3-5 で消した（中身は上のリンクと同じ）
 
 ## 1. 位置づけ
 
@@ -74,7 +75,7 @@
 | 操作の記録（`op:`、`ops:active`）、やり直しのワーカー、`/operations` | なくす | 補償の要る操作がなくなる。エッジと CA は宣言的で、ずれは aka-ossbss の整合のループが直す |
 | IMSI ごとのロック | なくす | 下流の 1 回の操作は下流の中で原子的（Lua）。複数の手順の間の排他が要らなくなる |
 | PLMN マップと鍵の置き場所の決め方、vector-gateway の AV クライアント ID の確かめ | なくす | 取得先は IMSI ごとに aka-radius が持つ。AV クライアントは一括投入の設定で aka-ossbss が選ぶ |
-| 本PoC の Provisioning API・aka-only-server の管理API 0.2.0 の型つきのクライアント | なくし、口の一覧つきの中継に統一する | 下流の中身を解釈しない |
+| eapaka-radius-server-poc の Provisioning API・aka-only-server の管理API 0.2.0 の型つきのクライアント | なくし、口の一覧つきの中継に統一する | 下流の中身を解釈しない |
 | `/clients` の書き込みと `/clients/{id}/secret` の中継 | なくす | RADIUS クライアントは aka-radius のコマンドで管理する（aka-radius の決定事項 6。§16 の D8） |
 | `/subscribers/{imsi}/keys` の中継 | なくす | 鍵の読み出しは aka-vecgen で既定で無効。管理面を通さない（概要 §12.2） |
 
@@ -150,7 +151,7 @@
 
 ### 8.2 クライアント証明書の入れ替え
 
-管理用の mTLS のピンの入れ替え（概要 §12.3）は、次の順で行う。手順は、ノードを横断する運用手順書に書く。
+管理用の mTLS のピンの入れ替え（概要 §12.3）は、次の順で行う（手順は運用ガイド 3.2）。
 
 1. 新しいクライアント証明書を作る（`aka-provisioner gen-client-cert`）。
 2. 全下流のピンのファイルに、新旧の 2 つを並べて書き、それぞれ `SIGHUP` で読み直す（aka-vecgen・aka-radius はファイル、radsec-ca・エッジは段階 4 でそろえる。§16 の D4）。
@@ -208,7 +209,7 @@
 |---|---|---|
 | 1 | リポジトリ `aka-provisioner` を作り、eapaka-node-provisioner の履歴ごと移す。改名だけ | 今の CI が通る |
 | 3-1 | 統合操作・操作の記録・ワーカー・ロック・PLMN マップ・型つきのクライアントをなくし、口の一覧つきの中継（`/admin/v2/vecgen/...`、`/radius/...`）にする。`Idempotency-Key` の必須化、登録簿とピンのファイル、監査ログの書き出し、`/status` | 単体、aka-vecgen・aka-radius との契約の試験。**済み（2026-10-30）**: 下の「段階 3-1 で決めたこと」 |
-| 3-2 | 運用ガイド（クライアント証明書の入れ替え、エッジの足し方） | 手元の compose |
+| 3-5 | 運用ガイド（下流と管理クライアント、クライアント証明書の入れ替え、Fluent Bit、バックアップと戻し）、`docs/poc/` を消す | 手元の compose。**済み（2026-10-31）**: 下の「段階 3-5 で決めたこと」。エッジの足し方は段階 4-2 で足す |
 | 4-2 | radsec-ca とエッジの中継を足す（radsec-edge §23.1 の 4-2） | 契約の試験（エッジと radsec-ca を CI で起動） |
 
 - 段階 3-1 は aka-vecgen・aka-radius の管理API 2.0.0（それぞれの段階 2）の後に行う。
@@ -227,6 +228,15 @@
 - U10: compose に管理面の Fluent Bit を置いた（`configs/fluent-bit/fluent-bit.yaml`。aka-provisioner と Valkey のほか、aka-ossbss・その PostgreSQL・cloudflared のタグも先に書いた）。同じホストで aka-radius の Fluent Bit と並べて試すときのために、ホストのポートを `PROVISIONER_FLUENT_BIT_PORT` で変えられる。同じホストで試す重ね合わせは `compose.aka-radius-admin.yaml`（`compose.eapaka-prov.yaml` を改めた）と `compose.aka-av.yaml`。下流の登録簿と証明書は `downstreams/`、監査ログのファイルは `audit/` をマウントする。
 - U11: OpenAPI を 2.0.0 に書き直した（自分の口、中継の口の一覧と作法、エラー。下流の項目は写さない）。README を今の作りに直した。運用ガイドの書き直しと `docs/poc/` の削除は 3-5。
 - そのほか: 要求の本文の上限は 1 MiB、下流のタイムアウトの上限は 30 秒（もとの 10 秒の上限はロックとの兼ね合いだったので改めた）、`Idempotency-Key` の処理中の記録の期限は 60 秒。接続ごとの TLS 設定で HTTP/2 が落ちないよう ALPN を入れた。ログの `event_id`: `STARTING`、`*_LOADED`・`*_LOAD_ERR`・`*_RELOADED`・`*_RELOAD_ERR`（`ADMIN_CLIENTS`・`DOWNSTREAMS`・`SERVER_CERT`）、`VALKEY_CONN_ERR`、`AUDIT_DIR_ERR`、`SYS_LISTEN_ERR`、`ADMIN_REQUEST`、`ADMIN_CLIENT_REJECTED`、`RELAY_DENIED`、`DOWNSTREAM_UNREACHABLE`・`DOWNSTREAM_REACHABLE`、`DOWNSTREAM_ERROR`、`IDEMPOTENT_REPLAYED`、`AUDIT`・`AUDIT_WRITE_ERR`・`AUDIT_MAINTAIN_ERR`、`SYSTEM_ERROR`。
+
+段階 3-5 で決めたこと（2026-10-31。aka-mvpset の確認事項 T1〜T10 はすべて推奨案で合意）:
+
+- T2・T3: 運用ガイドを全面的に書き直した（10 章。手本は aka-vecgen・aka-radius の運用ガイド）。設定の一覧は README に置き、ガイドは手順に絞った。手順は手元の compose で、本物の aka-vecgen・aka-radius と aka-ossbss のクライアント証明書を相手に通した（導入、`check-downstream`、mTLS の `/status`、ピンとクライアント証明書の入れ替え、登録簿とピンの形の誤り、サーバー証明書の作り直し、バックアップと戻し、Valkey を失ったとき、Fluent Bit のファイル）。
+- T4: CI に「運用ガイドの手順の通し確認」のジョブを足した（compose で起動し、mTLS で `/status`、`check-downstream` の失敗と原因の見当、`Idempotency-Key` の必須と許していない口、ピンの入れ替えと `SIGHUP`、Valkey のバックアップと戻し、Fluent Bit のファイル）。
+- T5: RPO・RTO は段階 5 の前に決める。ガイドには取り方と戻し方を書き、頻度は書かない。
+- T6: `scripts/backup-valkey.sh`・`restore-valkey.sh` は aka-vecgen・aka-radius から写した。Valkey が持つのは冪等の記録（24 時間）と監査ログの Stream で、失っても業務は続く（ガイドの 8 章）。
+- T9: `docs/poc/` を消し、参照はもとのリポジトリの固定のコミット（`0ca238d`）へのリンクにした。
+- 手元の試しで分かったこと: ピンのファイルはファイルごとマウントしているので、`sed -i`（新しいファイルに置き換える）で書き換えると、動いているコンテナは古い中身を読み続ける（`SIGHUP` でも効かない。Docker Desktop では `start` が mount の誤りになった）。古い行は `grep -v … > 別のファイル`、`cat 別のファイル > ピンのファイル` でその場で書き換える（ガイドの 4.1・4.2）。サーバー証明書の作り直しはボリュームを消して起動し直す（コマンドは足さない）。
 
 ## 15. 他の文書への反映
 
