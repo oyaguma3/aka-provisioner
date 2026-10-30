@@ -217,7 +217,7 @@ jobs:
       # 契約の試験の相手にする下流のコミット。aka-mvpset の versions.env の VECGEN_REF・RADIUS_REF と一致させる
       # （下流の API を変えたら、その main に入った後のコミットに更新する）。
       VECGEN_REF: 2d4837939660fbadcec67b27b4ac333f96a77374
-      RADIUS_REF: ac2f05aeda99472284f48b09943c1553476a6a7b
+      RADIUS_REF: 00506874286cca3d454e3ba64365c6e7f0b10fe6
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
