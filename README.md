@@ -5,7 +5,7 @@
 
 > このリポジトリは、VPS に分けて置いて顧客を収容する **MVP セット**（[aka-mvpset](https://github.com/oyaguma3/aka-mvpset)）の、管理面の中継のノードです。PoC セット（[eapaka-pocset](https://github.com/oyaguma3/eapaka-pocset) の `pocset-v1.0.1`）の [eapaka-node-provisioner](https://github.com/oyaguma3/eapaka-node-provisioner) の履歴を引き継いで作りました（もとのコミット `0ca238d`）。
 >
-> MVP のための改修は、[設計概要](docs/design-overview.md)のとおりに MVP セットの段階 3・4 で行っています。段階 3-1 で、加入者の統合操作と補償をなくし、許した口だけを通す中継（`/admin/v2`）にしました。radsec-ca とエッジへの中継は段階 4-2 で足します。運用ガイド（[docs/operation-guide.md](docs/operation-guide.md)）は段階 3-5 で書き直すまで PoC の作りのままなので、今の導入はこの README を見てください。
+> MVP のための改修は、[設計概要](docs/design-overview.md)のとおりに MVP セットの段階 3・4 で行っています。段階 3-1 で、加入者の統合操作と補償をなくし、許した口だけを通す中継（`/admin/v2`）にしました。radsec-ca とエッジへの中継は段階 4-2 で足します。
 
 管理面の aka-ossbss から、下流（[aka-vecgen](https://github.com/oyaguma3/aka-vecgen) と [aka-radius](https://github.com/oyaguma3/aka-radius) の管理API 2.0.0）への変更の経路を 1 つにまとめる中継です（コマンド名 `aka-provisioner`）。
 
@@ -34,10 +34,10 @@
 
 ## 導入
 
-Docker Engine と compose プラグインが要ります。aka-vecgen と aka-radius を導入しておき、aka-provisioner を両方の管理クライアントとして登録します。
+Docker Engine と compose プラグインが要ります。aka-vecgen と aka-radius を導入しておき、aka-provisioner を両方の管理クライアントとして登録します。詳しい手順と注意（下流とのつなぎ方、証明書の入れ替え、Fluent Bit、公開範囲、バックアップと戻し、更新、障害時の確かめ）は[運用ガイド](docs/operation-guide.md)にあります。
 
 1. `.env.example` を `.env` にコピーし、専用の Valkey のパスワード（`PROVISIONER_VALKEY_PASSWORD`）を書きます。
-2. 管理クライアント（aka-ossbss）のピンのファイル `secrets/admin-clients` を書きます。1 行に `識別名=クライアント証明書の SHA-256 のフィンガープリント` で、同じ識別名に新旧 2 つを書けます。1 つもないと起動しません。**コンテナを一度でも動かす前に作ります**（ないと Docker が同じ名前のディレクトリを作ります）。
+2. 管理クライアント（aka-ossbss）のピンのファイル `secrets/admin-clients` を書きます。1 行に `識別名=クライアント証明書の SHA-256 のフィンガープリント` で、同じ識別名に新旧 2 つを書けます。1 つもないと起動しません。**コンテナを一度でも動かす前に作ります**（ないと Docker が同じ名前のディレクトリを作ります）。監査ログのディレクトリ `audit/` も作ります。
 3. 下流に提示するクライアント証明書を作り、表示された 1 行（`provisioner=<フィンガープリント>`）を、aka-vecgen と aka-radius の管理クライアントのピンのファイルに足して、それぞれ `SIGHUP` で読み直します。標準出力には証明書と秘密鍵が続けて出るので、そのまま 1 つのファイルにして、登録簿の `clientCert` と `clientKey` の両方に書きます。
 
 ```bash
@@ -113,14 +113,15 @@ compose の `.env` に書く値（公開先 `PROVISIONER_PUBLISH`、共有ネッ
 | `server-cert` | API のサーバー証明書を出す（なければ自己署名を作る） |
 | `healthcheck` | ループバックの healthcheck の口に問い合わせる（compose の healthcheck） |
 
+Valkey のバックアップと戻しは `scripts/backup-valkey.sh`・`scripts/restore-valkey.sh` です（運用ガイド 8 章）。
+
 ## ドキュメント
 
 | ファイル | 内容 |
 |---|---|
 | [docs/design-overview.md](docs/design-overview.md) | 設計概要（MVP。決定事項と段階の記録） |
 | [docs/openapi/provisioner-api.yaml](docs/openapi/provisioner-api.yaml) | API 仕様（2.0.0。中継の口の一覧と、自分の口） |
-| [docs/operation-guide.md](docs/operation-guide.md) | 運用ガイド（段階 3-5 で書き直すまで PoC の作りのまま） |
-| [docs/poc/design-overview.md](docs/poc/design-overview.md) | PoC の設計概要（段階 3-5 で消す） |
+| [docs/operation-guide.md](docs/operation-guide.md) | 運用ガイド（導入、下流と管理クライアント、Fluent Bit、公開範囲、ログと監査ログ、バックアップと戻し、更新、障害時の確かめ） |
 
 ## 開発
 
@@ -156,6 +157,7 @@ GitHub Actions（`.github/workflows/ci.yml`）で、push と pull request のた
 |---|---|
 | テスト | gofmt の確認、`go vet`、race 検出つきの試験（Valkey の結合の試験を含む） |
 | イメージと compose の設定 | イメージのビルド、compose の設定の検査（下流が別ホスト・同一ホスト）、compose での起動と healthcheck、Fluent Bit のファイルへの書き込み |
+| 運用ガイドの手順の通し確認 | compose で起動し、mTLS で `/status`、`check-downstream`、管理クライアントのピンの入れ替えと `SIGHUP`、Valkey のバックアップと戻し |
 | 下流との契約の試験 | aka-vecgen・aka-radius を固定のコミット（ci.yml の `VECGEN_REF`・`RADIUS_REF`）でビルドし、口の一覧と下流の OpenAPI を突き合わせ、`scripts/contract.sh` で起動して契約の試験を流す |
 
 依存と標準ライブラリの既知の脆弱性は、`.github/workflows/govulncheck.yml` が push と pull request のたびと、毎週月曜に govulncheck で調べます。

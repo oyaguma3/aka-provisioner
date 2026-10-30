@@ -11,6 +11,8 @@ CLAUDE.md
 *.pem
 *.key
 /certs/
+# Valkey のバックアップ（運用ガイド 8 章）
+/backups/
 
 # リポジトリ直下で go build したときの成果物
 /aka-provisioner

@@ -111,6 +111,104 @@ jobs:
         if: always()
         run: docker compose down -v || true
 
+  guide:
+    name: 運用ガイドの手順の通し確認
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: 準備（ピン、クライアント証明書、登録簿）
+        run: |
+          cp .env.example .env
+          sed -i 's|^PROVISIONER_VALKEY_PASSWORD=.*|PROVISIONER_VALKEY_PASSWORD=ci-valkey-password|' .env
+          # ピンのファイルはコンテナを動かす前に作る（ないと Docker が同じ名前のディレクトリを作る）
+          mkdir -p secrets audit certs backups
+          touch secrets/admin-clients
+          docker compose build -q
+          docker compose run --rm --no-deps -T aka-provisioner gen-client-cert -name provisioner > downstreams/client.pem 2> gen.txt
+          grep -E '^provisioner=[0-9a-f]{64}$' gen.txt
+          # 下流は立てない（届かない宛先。下流とのやり取りは「下流との契約の試験」で確かめる）
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=downstream \
+            -keyout "$RUNNER_TEMP/ds.key" -out downstreams/vecgen-admin.pem 2>/dev/null
+          cp downstreams/vecgen-admin.pem downstreams/radius-admin.pem
+          sed -e 's#https://10.20.0.2:9443#https://127.0.0.1:1#' -e 's#https://10.20.0.2:9444#https://127.0.0.1:2#' \
+            downstreams/downstreams.example.json > downstreams/downstreams.json
+          # 管理クライアント（aka-ossbss の代わり）の証明書。ピンは openssl の出力の形でも書ける
+          for n in ossbss ossbss-new; do
+            openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj "/CN=$n" \
+              -addext extendedKeyUsage=clientAuth -keyout "$RUNNER_TEMP/$n.key" -out "$RUNNER_TEMP/$n.pem" 2>/dev/null
+          done
+          echo "ossbss=$(openssl x509 -in "$RUNNER_TEMP/ossbss.pem" -noout -fingerprint -sha256 | cut -d= -f2)" > secrets/admin-clients
+          sudo chown -R 65532:65532 downstreams secrets/admin-clients audit
+          sudo chmod 600 downstreams/client.pem secrets/admin-clients
+      - name: 起動と mTLS の /status
+        run: |
+          docker compose up -d --wait --wait-timeout 120
+          docker compose ps
+          docker compose exec -T aka-provisioner /aka-provisioner healthcheck
+          docker compose exec -T aka-provisioner /aka-provisioner server-cert > "$RUNNER_TEMP/server.pem"
+          A="curl -sS --fail-with-body --cacert $RUNNER_TEMP/server.pem --cert $RUNNER_TEMP/ossbss.pem --key $RUNNER_TEMP/ossbss.key"
+          $A https://localhost:9446/admin/v2/status | jq -e '.adminClients == ["ossbss"] and .valkey.reachable and (.downstreams | length == 2)'
+          # 下流に届かなければ check-downstream は失敗し、原因の見当を出す
+          if docker compose exec -T aka-provisioner /aka-provisioner check-downstream > check.txt 2>&1; then
+            cat check.txt
+            echo "届かない下流で check-downstream が成功しました"
+            exit 1
+          fi
+          grep -q '接続できません' check.txt
+          # 下流を書き換える要求は Idempotency-Key が必須、許していない口は通さない
+          test "$($A -o /dev/null -w '%{http_code}' -X POST https://localhost:9446/admin/v2/vecgen/subscribers -d '{}' || true)" = 400
+          test "$($A -o /dev/null -w '%{http_code}' https://localhost:9446/admin/v2/vecgen/subscribers/440100123456789/keys || true)" = 404
+      - name: 管理クライアントのピンの入れ替え（運用ガイド 4.2）
+        run: |
+          OLD="curl -sS --fail-with-body --cacert $RUNNER_TEMP/server.pem --cert $RUNNER_TEMP/ossbss.pem --key $RUNNER_TEMP/ossbss.key"
+          NEW="curl -sS --fail-with-body --cacert $RUNNER_TEMP/server.pem --cert $RUNNER_TEMP/ossbss-new.pem --key $RUNNER_TEMP/ossbss-new.key"
+          old_fp=$(openssl x509 -in "$RUNNER_TEMP/ossbss.pem" -noout -fingerprint -sha256 | cut -d= -f2)
+          new_fp=$(openssl x509 -in "$RUNNER_TEMP/ossbss-new.pem" -noout -fingerprint -sha256 | cut -d= -f2)
+          # 登録していない証明書は TLS のハンドシェイクで断る
+          if $NEW https://localhost:9446/admin/v2/status; then
+            echo "登録していない管理クライアントが接続できてしまいました"
+            exit 1
+          fi
+          echo "ossbss=$new_fp" | sudo tee -a secrets/admin-clients > /dev/null
+          docker compose kill -s HUP aka-provisioner
+          sleep 1
+          $OLD https://localhost:9446/admin/v2/status > /dev/null
+          $NEW https://localhost:9446/admin/v2/status > /dev/null
+          # 古い行を消す。ファイルごとマウントしているので、その場で書き換える
+          sudo sh -c "grep -v '$old_fp' secrets/admin-clients > /tmp/admin-clients.new && cat /tmp/admin-clients.new > secrets/admin-clients && rm /tmp/admin-clients.new"
+          docker compose kill -s HUP aka-provisioner
+          sleep 1
+          $NEW https://localhost:9446/admin/v2/status > /dev/null
+          if $OLD https://localhost:9446/admin/v2/status; then
+            echo "消したピンの管理クライアントが接続できてしまいました"
+            exit 1
+          fi
+      - name: Valkey のバックアップと戻し（運用ガイド 8 章）
+        run: |
+          A="curl -sS --cacert $RUNNER_TEMP/server.pem --cert $RUNNER_TEMP/ossbss-new.pem --key $RUNNER_TEMP/ossbss-new.key"
+          v() { docker compose exec -T valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning "$@"' valkey-cli "$@"; }
+          v SET ci:marker before
+          scripts/backup-valkey.sh backups/valkey.rdb
+          # 写しの後の変更は、戻すと消える
+          v SET ci:marker after
+          scripts/restore-valkey.sh backups/valkey.rdb
+          docker compose up -d --wait --wait-timeout 120
+          test "$(v GET ci:marker)" = before
+          $A --fail-with-body --retry 10 --retry-delay 2 --retry-all-errors https://localhost:9446/admin/v2/status | jq -e '.valkey.reachable'
+      - name: Fluent Bit のファイル
+        run: |
+          sleep 3
+          sudo grep -q '"event_id":"ADMIN_REQUEST"' logs_on_host/provisioner.log
+          sudo grep -q '"event_id":"ADMIN_CLIENTS_RELOADED"' logs_on_host/provisioner.log
+          sudo grep -q '"event_id":"ADMIN_CLIENT_REJECTED"' logs_on_host/provisioner.log
+      - name: compose のログ（失敗時）
+        if: failure()
+        run: docker compose logs --no-color || true
+      - name: 片付け
+        if: always()
+        run: docker compose down -v || true
+
   contract:
     name: 下流との契約の試験
     runs-on: ubuntu-latest
