@@ -1,4 +1,4 @@
-# テスト、イメージのビルドと compose の設定の確認、下流（aka-vecgen・aka-radius の管理API 2.0.0）との契約の試験を行う。
+# テスト、イメージのビルドと compose の設定の確認、下流（aka-vecgen・aka-radius の管理API 2.0.0、radsec-ca、エッジ）との契約の試験を行う。
 name: CI
 
 on:
@@ -212,12 +212,14 @@ jobs:
   contract:
     name: 下流との契約の試験
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
-      # 契約の試験の相手にする下流のコミット。aka-mvpset の versions.env の VECGEN_REF・RADIUS_REF と一致させる
+      # 契約の試験の相手にする下流のコミット。aka-mvpset の versions.env の VECGEN_REF・RADIUS_REF・CA_REF・EDGE_REF と一致させる
       # （下流の API を変えたら、その main に入った後のコミットに更新する）。
       VECGEN_REF: 2d4837939660fbadcec67b27b4ac333f96a77374
       RADIUS_REF: 00506874286cca3d454e3ba64365c6e7f0b10fe6
+      CA_REF: 934eaeb4e3e5d26196a40731edea1fdb681422f1
+      EDGE_REF: 6d5652dca97b26e2674debdbc0f75363fbbd65fb
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
@@ -230,6 +232,16 @@ jobs:
           repository: oyaguma3/aka-radius
           ref: ${{ env.RADIUS_REF }}
           path: aka-radius
+      - uses: actions/checkout@v7
+        with:
+          repository: oyaguma3/radsec-ca
+          ref: ${{ env.CA_REF }}
+          path: radsec-ca
+      - uses: actions/checkout@v7
+        with:
+          repository: oyaguma3/radsec-edge
+          ref: ${{ env.EDGE_REF }}
+          path: radsec-edge
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -237,6 +249,8 @@ jobs:
         run: |
           git -C aka-vecgen log -1 --format='aka-vecgen: %h %s'
           git -C aka-radius log -1 --format='aka-radius: %h %s'
+          git -C radsec-ca log -1 --format='radsec-ca: %h %s'
+          git -C radsec-edge log -1 --format='radsec-edge: %h %s'
           mkdir -p "$RUNNER_TEMP/bin"
           (cd aka-vecgen && go build -o "$RUNNER_TEMP/bin/aka-vecgen" ./cmd/aka-vecgen)
           (cd aka-radius && go build -o "$RUNNER_TEMP/bin/aka-radius" ./cmd/aka-radius)
@@ -245,6 +259,8 @@ jobs:
         env:
           PROVISIONER_TEST_VECGEN_OPENAPI: ${{ github.workspace }}/aka-vecgen/docs/openapi/admin-api.yaml
           PROVISIONER_TEST_RADIUS_OPENAPI: ${{ github.workspace }}/aka-radius/docs/openapi/admin-api.yaml
+          PROVISIONER_TEST_CA_OPENAPI: ${{ github.workspace }}/radsec-ca/docs/openapi/ca-api.yaml
+          PROVISIONER_TEST_EDGE_OPENAPI: ${{ github.workspace }}/radsec-edge/docs/openapi/edge-api.yaml
         run: |
           set -o pipefail
           go test -count=1 -run TestAllowlistMatchesOpenAPI -v ./internal/api/ | tee openapi.log
@@ -254,6 +270,9 @@ jobs:
             exit 1
           fi
       - name: 下流と aka-provisioner の起動
+        env:
+          CA_SRC: ${{ github.workspace }}/radsec-ca
+          EDGE_SRC: ${{ github.workspace }}/radsec-edge
         run: scripts/contract.sh up "$RUNNER_TEMP/bin" "$RUNNER_TEMP/work"
       - name: 契約の試験
         run: |
@@ -269,6 +288,9 @@ jobs:
         run: |
           for f in aka-vecgen aka-radius aka-provisioner; do
             echo "---- $f ----"; cat "$RUNNER_TEMP/work/$f.log" || true
+          done
+          for c in contract-ca-radsec-ca-1 contract-edge-radsec-edge-1 contract-edge-radsec-edge-agent-1 radsecproxy-acme; do
+            echo "---- $c ----"; docker logs "$c" 2>&1 | tail -n 200 || true
           done
       - name: 片付け
         if: always()

@@ -1,5 +1,6 @@
-// Package contract は、動いている aka-provisioner と本物の下流（aka-vecgen・aka-radius）を通した契約の試験（設計概要 §13。段階 3-1 の U4）。
-// 下流は CI の契約の試験のジョブで、aka-mvpset の versions.env の固定のコミットからビルドして起動する（scripts/contract-up.sh）。
+// Package contract は、動いている aka-provisioner と本物の下流（aka-vecgen・aka-radius、radsec_test.go では radsec-ca・エッジ）を通した
+// 契約の試験（設計概要 §13。段階 3-1 の U4、段階 4-2 の P12）。
+// 下流は CI の契約の試験のジョブで、aka-mvpset の versions.env の固定のコミットからビルドして起動する（scripts/contract.sh）。
 // 次の環境変数を与えたときだけ動く（なければ飛ばす）:
 //
 //	PROVISIONER_TEST_URL           aka-provisioner の API の基底 URL（例 https://127.0.0.1:19446/admin/v2）
@@ -52,7 +53,8 @@ func newClient(t *testing.T) *client {
 		t.Fatal(err)
 	}
 	return &client{t: t, base: strings.TrimSuffix(base, "/"), hc: &http.Client{
-		Timeout:   15 * time.Second,
+		// radsec-ca とエッジの呼び出しは aka-provisioner で 30 秒まで待つ（P4）。
+		Timeout:   35 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, Certificates: []tls.Certificate{cert}}},
 	}}
 }
@@ -117,7 +119,15 @@ func (c *client) want(r response, status int, what string) response {
 	return r
 }
 
-// waitReachable は、aka-provisioner が全下流につながったと /status に出るまで待つ。
+// edgeDown は登録簿にあるが届かないエッジの名前（radsec-ca・エッジを起動したときだけ。なければ空文字）。
+func edgeDown() string {
+	if id := os.Getenv("PROVISIONER_TEST_EDGE_DOWN_ID"); id != "" {
+		return "edge:" + id
+	}
+	return ""
+}
+
+// waitReachable は、aka-provisioner が全下流（届かないエッジを除く）につながったと /status に出るまで待つ。
 func (c *client) waitReachable() {
 	c.t.Helper()
 	deadline := time.Now().Add(40 * time.Second)
@@ -125,7 +135,8 @@ func (c *client) waitReachable() {
 		st := c.want(c.do(http.MethodGet, "/status", "", "contract-status", nil), 200, "status").json(c.t)
 		all := true
 		for _, d := range st["downstreams"].([]any) {
-			if d.(map[string]any)["reachable"] != true {
+			m := d.(map[string]any)
+			if m["reachable"] != true && m["name"] != edgeDown() {
 				all = false
 			}
 		}
@@ -273,7 +284,7 @@ func TestContract(t *testing.T) {
 		}
 		st := c.want(c.do(http.MethodGet, "/status", "", "t-status", nil), 200, "status").json(t)
 		for _, d := range st["downstreams"].([]any) {
-			if m := d.(map[string]any); m["status"] == nil {
+			if m := d.(map[string]any); m["status"] == nil && m["name"] != edgeDown() {
 				t.Errorf("status of %v is missing", m["name"])
 			}
 		}
