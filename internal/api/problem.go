@@ -18,6 +18,9 @@ const (
 	causeIdempotencyKeyMismatch = "IDEMPOTENCY_KEY_MISMATCH"
 	causeDownstreamError        = "DOWNSTREAM_ERROR"
 	causeDownstreamUnavailable  = "DOWNSTREAM_UNAVAILABLE"
+	causeEdgeNotFound           = "EDGE_NOT_FOUND"
+	// causeIdempotencyConflict は radsec-ca・エッジの cause（P8）。aka-provisioner 自身は返さない。
+	causeIdempotencyConflict = "IDEMPOTENCY_CONFLICT"
 )
 
 type invalidParam struct {
@@ -33,7 +36,7 @@ type problem struct {
 	Cause         string         `json:"cause,omitempty"`
 	InvalidParams []invalidParam `json:"invalidParams,omitempty"`
 
-	// Downstream は誤りの起きた下流（vecgen / radius）。provisioner 自身の誤りでは空。
+	// Downstream は誤りの起きた下流（vecgen / radius / ca / edge:<ID>）。provisioner 自身の誤りでは空。
 	Downstream string `json:"downstream,omitempty"`
 	// DownstreamStatus は、下流が ProblemDetails でない応答を返したときの、下流の HTTP のステータス（502 のとき）。
 	DownstreamStatus int `json:"downstreamStatus,omitzero"`

@@ -1,4 +1,4 @@
-// Package api は aka-provisioner の API（/admin/v2）。下流（aka-vecgen・aka-radius）の管理API のうち、許した口だけを
+// Package api は aka-provisioner の API（/admin/v2）。下流（aka-vecgen・aka-radius・radsec-ca・エッジ）の管理API のうち、許した口だけを
 // 中継する（設計概要 §6）。下流を書き換える要求では Idempotency-Key を必須にし（§7）、成功したら監査ログに残す（§10）。
 package api
 
@@ -42,7 +42,7 @@ type Handler struct {
 	Log *slog.Logger
 	// MgmtClient は要求のクライアント証明書から管理クライアントの識別名を返す（監査ログとログに残す）。
 	MgmtClient func(*http.Request) string
-	// Downstream は下流の名前から中継のクライアントを返す（登録簿の読み直しで替わる）。
+	// Downstream は下流の名前から中継のクライアントを返す（登録簿の読み直しで替わる）。登録簿になければ nil。
 	Downstream func(downstream.Name) Relayer
 	Store      Store
 	Audit      *audit.Recorder
@@ -55,13 +55,9 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+basePath+"/status", h.getStatus)
 	mux.HandleFunc("GET "+basePath+"/audit-logs", h.listAuditLogs)
-	for _, name := range relayNames {
-		for _, rt := range allowlist[name] {
-			handler := h.relayHandler(name, rt)
-			if rt.write() {
-				handler = h.idempotent(handler)
-			}
-			mux.HandleFunc(rt.method+" "+basePath+"/"+string(name)+rt.path, handler)
+	for _, k := range kinds {
+		for _, rt := range allowlist[k] {
+			mux.HandleFunc(rt.method+" "+basePath+k.pathPrefix()+rt.path, h.relayHandler(k, rt))
 		}
 	}
 	return h.observe(checkOperator(h.withFallback(mux)))
@@ -161,6 +157,23 @@ func checkOperator(next http.Handler) http.Handler {
 	})
 }
 
+// deniedDownstream は、パスが下流の名前で始まるなら、その下流の名前を返す。エッジは ID の形が合うときだけ edge:<ID>。
+func deniedDownstream(path string) (string, bool) {
+	for _, k := range []kind{kindVecgen, kindRadius, kindCA} {
+		if strings.HasPrefix(path, basePath+"/"+string(k)+"/") {
+			return string(k), true
+		}
+	}
+	rest, ok := strings.CutPrefix(path, basePath+"/edges/")
+	if !ok {
+		return "", false
+	}
+	if id, _, _ := strings.Cut(rest, "/"); downstream.ValidEdgeID(id) {
+		return string(downstream.EdgeName(id)), true
+	}
+	return string(kindEdge), true
+}
+
 // fallbackMethods は、どのメソッドなら受け付けるかを調べるときに試すメソッド。
 var fallbackMethods = []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete}
 
@@ -173,15 +186,13 @@ func (h *Handler) withFallback(mux *http.ServeMux) http.Handler {
 			mux.ServeHTTP(w, r)
 			return
 		}
-		for _, name := range relayNames {
-			if strings.HasPrefix(r.URL.Path, basePath+"/"+string(name)+"/") {
-				h.Log.WarnContext(r.Context(), "route is not allowed", "event_id", "RELAY_DENIED", "trace_id", trace.From(r.Context()),
-					"downstream", string(name), "method", r.Method, "path", r.URL.Path, "mgmt_client", mgmtClientFrom(r.Context()))
-				p := newProblem(http.StatusNotFound, causeRouteNotAllowed, "the route is not allowed by aka-provisioner")
-				p.Downstream = string(name)
-				p.write(w)
-				return
-			}
+		if name, ok := deniedDownstream(r.URL.Path); ok {
+			h.Log.WarnContext(r.Context(), "route is not allowed", "event_id", "RELAY_DENIED", "trace_id", trace.From(r.Context()),
+				"downstream", name, "method", r.Method, "path", r.URL.Path, "mgmt_client", mgmtClientFrom(r.Context()))
+			p := newProblem(http.StatusNotFound, causeRouteNotAllowed, "the route is not allowed by aka-provisioner")
+			p.Downstream = name
+			p.write(w)
+			return
 		}
 		var allow []string
 		for _, m := range fallbackMethods {

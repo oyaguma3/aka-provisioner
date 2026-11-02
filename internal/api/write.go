@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json/v2"
 	"errors"
 	"io"
 	"net/http"
@@ -50,6 +51,8 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, *problem) {
 // idempotent は下流を書き換える要求の Idempotency-Key を扱う（設計概要 §7）。キーは必須で、なければ 400。
 // 同じ管理クライアントから同じキーで届いた要求には、最初の応答をそのまま返し、ハンドラーは呼ばない。
 // 応答を覚えるのは 4xx までで、5xx（下流に接続できない等）は覚えずに、同じキーでやり直せるようにする。
+// 下流の 409 IDEMPOTENCY_CONFLICT も覚えない（P8。下流が 30 秒を超えて 503 で記録を消した後の同じキーのやり直しで、下流の「処理中」の 409 を
+// 24 時間覚えてしまうため）。
 func (h *Handler) idempotent(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get(idempotencyKeyHeader)
@@ -104,7 +107,7 @@ func (h *Handler) idempotent(next http.HandlerFunc) http.HandlerFunc {
 		// 要求が途中で切れても、記録は残す。
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), storeTimeout)
 		defer cancel()
-		if rec.status >= 500 {
+		if rec.status >= 500 || downstreamIdempotencyConflict(rec.status, rec.body.Bytes()) {
 			err = h.Store.AbandonIdempotent(ctx, mgmtClient, key, hash)
 		} else {
 			err = h.Store.CompleteIdempotent(ctx, mgmtClient, key, hash, store.StoredResponse{
@@ -115,6 +118,17 @@ func (h *Handler) idempotent(next http.HandlerFunc) http.HandlerFunc {
 			h.Log.ErrorContext(ctx, "store idempotent response", "error", err)
 		}
 	}
+}
+
+// downstreamIdempotencyConflict は応答が下流の 409 IDEMPOTENCY_CONFLICT か。
+func downstreamIdempotencyConflict(status int, body []byte) bool {
+	if status != http.StatusConflict {
+		return false
+	}
+	var v struct {
+		Cause string `json:"cause"`
+	}
+	return json.Unmarshal(body, &v) == nil && v.Cause == causeIdempotencyConflict
 }
 
 // requestHash は、Idempotency-Key の要求が同じ内容かを比べるためのハッシュ（メソッド・パス・クエリ・本文）。

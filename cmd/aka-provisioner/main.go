@@ -147,7 +147,7 @@ func serve(ctx context.Context) error {
 		}
 		return nil
 	}
-	poller := &api.Poller{Downstream: relayer, Log: log}
+	poller := &api.Poller{Names: reg.Names, Downstream: relayer, Log: log}
 	h := &api.Handler{
 		Log:        log,
 		MgmtClient: pins.NameFromRequest,

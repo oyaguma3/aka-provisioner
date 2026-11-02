@@ -7,19 +7,19 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/oyaguma3/aka-provisioner/internal/downstream"
 )
 
 // TestAllowlistMatchesOpenAPI は、下流ごとに「許す口 ＋ 通さない口」が、下流の OpenAPI の口とぴったり同じであることを確かめる
 // （段階 3-1 の U3）。下流に口が増えたり消えたりしたら落ちるので、allowlist か denylist を直す。
 // 下流の OpenAPI のパスは環境変数で与える（CI の契約の試験のジョブで、固定のコミットの下流から渡す）。なければ飛ばす。
 func TestAllowlistMatchesOpenAPI(t *testing.T) {
-	files := map[downstream.Name]string{
-		downstream.Vecgen: os.Getenv("PROVISIONER_TEST_VECGEN_OPENAPI"),
-		downstream.Radius: os.Getenv("PROVISIONER_TEST_RADIUS_OPENAPI"),
+	files := map[kind]string{
+		kindVecgen: os.Getenv("PROVISIONER_TEST_VECGEN_OPENAPI"),
+		kindRadius: os.Getenv("PROVISIONER_TEST_RADIUS_OPENAPI"),
+		kindCA:     os.Getenv("PROVISIONER_TEST_CA_OPENAPI"),
+		kindEdge:   os.Getenv("PROVISIONER_TEST_EDGE_OPENAPI"),
 	}
-	for _, name := range relayNames {
+	for _, name := range kinds {
 		t.Run(string(name), func(t *testing.T) {
 			path := files[name]
 			if path == "" {
@@ -48,9 +48,38 @@ func TestAllowlistMatchesOpenAPI(t *testing.T) {
 	}
 }
 
+// TestOpenAPIRoutes は、: を含むパスと、口の下の parameters を読めることを確かめる。
+func TestOpenAPIRoutes(t *testing.T) {
+	path := t.TempDir() + "/openapi.yaml"
+	if err := os.WriteFile(path, []byte(`openapi: 3.1.0
+paths:
+  /status:
+    get:
+      summary: 状態
+  /tenants/{tenantId}/crl:refresh:
+    parameters:
+      - name: tenantId
+    post:
+      summary: 取り直し
+components:
+  parameters:
+    get:
+      summary: 口ではない
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := openAPIRoutes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"GET /status", "POST /tenants/{tenantId}/crl:refresh"}; !slices.Equal(got, want) {
+		t.Errorf("routes = %q, want %q", got, want)
+	}
+}
+
 var (
-	// openAPIPath は paths の下の口（字下げ 2）。
-	openAPIPath = regexp.MustCompile(`^  (/[^:\s]*):\s*$`)
+	// openAPIPath は paths の下の口（字下げ 2）。パスに : を含むことがある（crl:refresh）。
+	openAPIPath = regexp.MustCompile(`^  (/\S*):\s*$`)
 	// openAPIMethod は口の下のメソッド（字下げ 4）。
 	openAPIMethod = regexp.MustCompile(`^    (get|put|post|delete|patch|head|options):`)
 )

@@ -158,8 +158,26 @@ type env struct {
 	st     *memStore
 	vecgen *fakeRelayer
 	radius *fakeRelayer
+	ca     *fakeRelayer
+	edge   *fakeRelayer
+	edge2  *fakeRelayer
+	// names は登録簿の今の下流（試験の中で変えて、読み直しの代わりにする）。
+	names  []downstream.Name
 	poller *Poller
 	logs   *lockedBuffer
+}
+
+const (
+	edge01 = downstream.Name("edge:edge-01")
+	edge02 = downstream.Name("edge:edge-02")
+)
+
+// fake は下流の名前の代わりを返す。登録簿になければ nil。
+func (e *env) fake(n downstream.Name) *fakeRelayer {
+	if !slices.Contains(e.names, n) {
+		return nil
+	}
+	return map[downstream.Name]*fakeRelayer{downstream.Vecgen: e.vecgen, downstream.Radius: e.radius, downstream.CA: e.ca, edge01: e.edge, edge02: e.edge2}[n]
 }
 
 func testCert(t *testing.T, name string) *x509.Certificate {
@@ -181,16 +199,21 @@ func newEnv(t *testing.T) *env {
 		st:     &memStore{idem: map[string]idemRecord{}},
 		vecgen: &fakeRelayer{baseURL: "https://vecgen.example:9443/admin/v2", cert: testCert(t, "vecgen.example")},
 		radius: &fakeRelayer{baseURL: "https://radius.example:9444/admin/v2", cert: testCert(t, "radius.example")},
-		logs:   &lockedBuffer{},
+		ca:     &fakeRelayer{baseURL: "https://radsec-ca:9448", cert: testCert(t, "radsec-ca")},
+		// エッジはまだ接続していない（cert が nil）。
+		edge:  &fakeRelayer{baseURL: "https://10.0.0.1:9447"},
+		edge2: &fakeRelayer{baseURL: "https://10.0.0.2:9447"},
+		names: []downstream.Name{downstream.Vecgen, downstream.Radius, downstream.CA, edge01, edge02},
+		logs:  &lockedBuffer{},
 	}
 	log := slog.New(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	relayer := func(n downstream.Name) Relayer {
-		if n == downstream.Vecgen {
-			return e.vecgen
+		if f := e.fake(n); f != nil {
+			return f
 		}
-		return e.radius
+		return nil
 	}
-	e.poller = &Poller{Downstream: relayer, Log: log}
+	e.poller = &Poller{Names: func() []downstream.Name { return e.names }, Downstream: relayer, Log: log}
 	client := testCert(t, "provisioner")
 	server := testCert(t, "aka-provisioner")
 	h := &Handler{
@@ -247,22 +270,23 @@ func problemOf(t *testing.T, w *httptest.ResponseRecorder, wantStatus int) probl
 	return decode[problem](t, w, wantStatus)
 }
 
-// TestAllowlist は、許す口がすべて下流の同じメソッドとパスに届き、書き込みでは Idempotency-Key を求めることを確かめる。
+// pathValues は試験で使うパスの値。
+var pathValues = map[string]string{"{imsi}": "440100123456789", "{clientId}": "7", "{caId}": "tenant.acme", "{serial}": "0abc12", "{tenantId}": "42"}
+
+// TestAllowlist は、許す口がすべて下流の同じメソッドとパスに届き、書き込みでは Idempotency-Key を求め、
+// radsec-ca とエッジにだけキーを渡すことを確かめる。
 func TestAllowlist(t *testing.T) {
-	values := map[string]string{"{imsi}": "440100123456789", "{clientId}": "7"}
-	for _, name := range relayNames {
-		for _, rt := range allowlist[name] {
-			t.Run(string(name)+" "+rt.method+" "+rt.path, func(t *testing.T) {
+	for _, k := range kinds {
+		for _, rt := range allowlist[k] {
+			t.Run(string(k)+" "+rt.method+" "+rt.path, func(t *testing.T) {
 				e := newEnv(t)
-				fake := e.radius
-				if name == downstream.Vecgen {
-					fake = e.vecgen
-				}
+				fake := map[kind]*fakeRelayer{kindVecgen: e.vecgen, kindRadius: e.radius, kindCA: e.ca, kindEdge: e.edge}[k]
 				path := rt.path
-				for k, v := range values {
+				for k, v := range pathValues {
 					path = strings.ReplaceAll(path, k, v)
 				}
-				url := basePath + "/" + string(name) + path + "?limit=5"
+				prefix := strings.ReplaceAll(k.pathPrefix(), "{edgeId}", "edge-01")
+				url := basePath + prefix + path + "?limit=5"
 				body := ""
 				if rt.method != http.MethodGet && rt.method != http.MethodDelete {
 					body = `{"state":"inactive"}`
@@ -282,11 +306,40 @@ func TestAllowlist(t *testing.T) {
 				if req.Method != rt.method || "/"+strings.Join(req.Path, "/") != path || req.RawQuery != "limit=5" || string(req.Body) != body {
 					t.Errorf("relayed = %+v, want %s %s", req, rt.method, path)
 				}
-				if got := len(e.st.auditEntries()); got != map[bool]int{true: 1, false: 0}[rt.write()] {
-					t.Errorf("audits = %d", got)
+				if want := map[bool]string{true: "k-1"}[k.radsec() && rt.write()]; req.IdempotencyKey != want {
+					t.Errorf("idempotency key = %q, want %q", req.IdempotencyKey, want)
+				}
+				audits := e.st.auditEntries()
+				if got := len(audits); got != map[bool]int{true: 1, false: 0}[rt.write()] {
+					t.Fatalf("audits = %d", got)
+				}
+				if rt.write() {
+					// パスの値のない口（登録と発行）は Location から取るので、ここでは空。
+					want := pathValues["{"+rt.targetParam()+"}"]
+					if a := audits[0]; a.Action != string(k)+"."+rt.action || a.Target != want {
+						t.Errorf("audit = %+v, want target %q", a, want)
+					}
 				}
 			})
 		}
+	}
+}
+
+// TestActions は監査ログの action の名前を確かめる（P5）。
+func TestActions(t *testing.T) {
+	var got []string
+	for _, k := range []kind{kindCA, kindEdge} {
+		for _, rt := range allowlist[k] {
+			if rt.write() {
+				got = append(got, string(k)+"."+rt.action)
+			}
+		}
+	}
+	want := []string{"ca.ca.create", "ca.ca.disable", "ca.crl.upload", "ca.crl.refresh", "ca.crl_source.put", "ca.cert.issue", "ca.cert.revoke",
+		"edge.tenant.put", "edge.tenant.delete", "edge.server_csr.create", "edge.server_cert.put", "edge.probe_csr.create", "edge.probe_cert.put",
+		"edge.tenant.apply", "edge.crl.refresh", "edge.tenant.restart"}
+	if !slices.Equal(got, want) {
+		t.Errorf("actions = %q", got)
 	}
 }
 
@@ -297,13 +350,18 @@ func TestDenied(t *testing.T) {
 		{http.MethodPost, "/admin/v2/radius/clients", "radius"},                         // RADIUS クライアントの書き込みはない
 		{http.MethodPut, "/admin/v2/radius/subscribers", "radius"},                      // メソッドが違うだけでも許さない
 		{http.MethodGet, "/admin/v2/vecgen/unknown", "vecgen"},
+		{http.MethodDelete, "/admin/v2/ca/cas/tenant.acme", "ca"},
+		{http.MethodPost, "/admin/v2/ca/cas/tenant.acme/refresh", "ca"}, // crl:refresh の綴りの違い
+		{http.MethodGet, "/admin/v2/edges/edge-01/tenants/42/aps", "edge:edge-01"},
+		{http.MethodPost, "/admin/v2/edges/none/unknown", "edge:none"},
+		{http.MethodGet, "/admin/v2/edges/Bad_ID/unknown", "edge"},
 	} {
 		p := problemOf(t, e.do(c.method, c.path, map[string]string{"Idempotency-Key": "k"}, ""), http.StatusNotFound)
 		if p.Cause != causeRouteNotAllowed || p.Downstream != c.ds {
 			t.Errorf("%s %s: %+v", c.method, c.path, p)
 		}
 	}
-	if e.vecgen.calls()+e.radius.calls() != 0 {
+	if e.vecgen.calls()+e.radius.calls()+e.ca.calls()+e.edge.calls() != 0 {
 		t.Error("denied routes reached a downstream")
 	}
 	if !strings.Contains(e.logs.String(), `"event_id":"RELAY_DENIED"`) {
@@ -325,20 +383,42 @@ func TestDenied(t *testing.T) {
 func TestPathValues(t *testing.T) {
 	e := newEnv(t)
 	for _, path := range []string{
-		"/admin/v2/vecgen/subscribers/1234",                   // 短すぎる
-		"/admin/v2/radius/subscribers/4401001234567890",       // 長すぎる
-		"/admin/v2/radius/subscribers/44010012345678x",        // 数字でない
-		"/admin/v2/vecgen/clients/0",                          // 1 以上
-		"/admin/v2/vecgen/clients/07",                         // 先頭の 0
-		"/admin/v2/vecgen/subscribers/440100123456789%2Fkeys", // "/" を含む値
+		"/admin/v2/vecgen/subscribers/1234",                    // 短すぎる
+		"/admin/v2/radius/subscribers/4401001234567890",        // 長すぎる
+		"/admin/v2/radius/subscribers/44010012345678x",         // 数字でない
+		"/admin/v2/vecgen/clients/0",                           // 1 以上
+		"/admin/v2/vecgen/clients/07",                          // 先頭の 0
+		"/admin/v2/vecgen/subscribers/440100123456789%2Fkeys",  // "/" を含む値
+		"/admin/v2/ca/cas/acme",                                // 接頭辞がない
+		"/admin/v2/ca/cas/tenant.Acme",                         // 大文字
+		"/admin/v2/ca/cas/tenant.",                             // 名前がない
+		"/admin/v2/ca/cas/tenant.a.b",                          // 名前が多い
+		"/admin/v2/ca/cas/brought.a",                           // 名前が足りない
+		"/admin/v2/ca/cas/server2",                             // server の綴りの違い
+		"/admin/v2/ca/cas/tenant.a%2Fb",                        // "/" を含む値
+		"/admin/v2/ca/certs/0ABC",                              // 大文字
+		"/admin/v2/ca/certs/xyz",                               // 16 進でない
+		"/admin/v2/edges/Edge_1/status",                        // エッジの ID の形
+		"/admin/v2/edges/edge-01/tenants/0",                    // 0 で始まる
+		"/admin/v2/edges/edge-01/tenants/acme",                 // 数字でない
+		"/admin/v2/edges/edge-01/tenants/12345678901234567890", // 20 桁
 	} {
 		p := problemOf(t, e.do(http.MethodGet, path, nil, ""), http.StatusBadRequest)
 		if p.Cause != causeMandatoryIEIncorrect {
 			t.Errorf("%s: %+v", path, p)
 		}
 	}
-	if e.vecgen.calls()+e.radius.calls() != 0 {
+	if e.vecgen.calls()+e.radius.calls()+e.ca.calls()+e.edge.calls() != 0 {
 		t.Error("bad path values reached a downstream")
+	}
+	// 正しい値は通す。
+	for _, path := range []string{
+		"/admin/v2/ca/cas/server", "/admin/v2/ca/cas/tenant.a", "/admin/v2/ca/cas/tenant.a-1", "/admin/v2/ca/cas/brought.acme.meraki-1",
+		"/admin/v2/ca/certs/0abc", "/admin/v2/edges/edge-01/tenants/1234567890123456789",
+	} {
+		if w := e.do(http.MethodGet, path, nil, ""); w.Code != http.StatusOK {
+			t.Errorf("%s: %d %s", path, w.Code, w.Body)
+		}
 	}
 }
 
@@ -391,6 +471,143 @@ func TestCreateAndAudit(t *testing.T) {
 		audits[1].Detail != `{"downstream":"radius","fields":["reason","state"]}` {
 		t.Errorf("audits = %+v", audits)
 	}
+}
+
+// TestRadsecRelay は radsec-ca とエッジの中継の作法を確かめる（P2・P8・P9・P10）。
+func TestRadsecRelay(t *testing.T) {
+	const crlKey = "AKIA-secret-meraki-api-key"
+	body := `{"tenant":"acme","kind":"brought","name":"meraki","crl":{"source":"meraki","merakiOrgId":"1","merakiApiKey":"` + crlKey + `"}}`
+	hdr := func(key string) map[string]string {
+		return map[string]string{"Idempotency-Key": key, "Content-Type": "application/json", "X-Operator-Id": "alice"}
+	}
+
+	t.Run("登録の Location と target", func(t *testing.T) {
+		e := newEnv(t)
+		e.ca.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+			return downstream.RelayResponse{Status: 201, ContentType: "application/json", Location: "/cas/brought.acme.meraki", Body: []byte(`{"id":"brought.acme.meraki"}`)}, nil
+		}
+		w := e.do(http.MethodPost, "/admin/v2/ca/cas", hdr("k-1"), body)
+		if w.Code != 201 || w.Header().Get("Location") != "/admin/v2/ca/cas/brought.acme.meraki" {
+			t.Fatalf("response = %d %v", w.Code, w.Header())
+		}
+		// 再送でも書き換えた Location を返す。
+		if again := e.do(http.MethodPost, "/admin/v2/ca/cas", hdr("k-1"), body); again.Header().Get("Location") != "/admin/v2/ca/cas/brought.acme.meraki" || e.ca.calls() != 1 {
+			t.Errorf("replay = %v, calls %d", again.Header(), e.ca.calls())
+		}
+		a := e.st.auditEntries()
+		if len(a) != 1 || a[0].Action != "ca.ca.create" || a[0].Target != "brought.acme.meraki" ||
+			a[0].Detail != `{"downstream":"ca","fields":["crl","kind","name","tenant"]}` {
+			t.Errorf("audit = %+v", a)
+		}
+		// Meraki の API キーの値はログにも監査ログにも残らない（項目の名前も最上位だけ）。
+		if strings.Contains(e.logs.String(), crlKey) || strings.Contains(a[0].Detail, crlKey) || strings.Contains(a[0].Detail, "merakiApiKey") {
+			t.Errorf("the API key is logged: %s %s", e.logs.String(), a[0].Detail)
+		}
+		// 発行の Location。
+		e.ca.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+			return downstream.RelayResponse{Status: 201, ContentType: "application/json", Location: "/certs/0abc", Body: []byte(`{}`)}, nil
+		}
+		if w := e.do(http.MethodPost, "/admin/v2/ca/certs", hdr("k-2"), `{"profile":"ap-client"}`); w.Header().Get("Location") != "/admin/v2/ca/certs/0abc" {
+			t.Errorf("issue = %v", w.Header())
+		}
+		if a := e.st.auditEntries(); a[1].Action != "ca.cert.issue" || a[1].Target != "0abc" {
+			t.Errorf("issue audit = %+v", a[1])
+		}
+	})
+
+	t.Run("エッジの下流の名前と Retry-After", func(t *testing.T) {
+		e := newEnv(t)
+		e.edge.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+			return downstream.RelayResponse{Status: 503, ContentType: "application/problem+json", RetryAfter: "2",
+				Body: []byte(`{"title":"Service Unavailable","status":503,"cause":"TENANT_BUSY"}`)}, nil
+		}
+		w := e.do(http.MethodPost, "/admin/v2/edges/edge-01/tenants/42/restart", hdr("k-1"), "")
+		p := problemOf(t, w, 503)
+		if p.Cause != "TENANT_BUSY" || p.Downstream != "edge:edge-01" || w.Header().Get("Retry-After") != "2" {
+			t.Errorf("busy = %+v %v", p, w.Header())
+		}
+		// 5xx は覚えないので、同じ鍵でやり直せる。
+		e.edge.relay = nil
+		if w := e.do(http.MethodPost, "/admin/v2/edges/edge-01/tenants/42/restart", hdr("k-1"), ""); w.Code != 200 || e.edge.calls() != 2 {
+			t.Errorf("retry = %d, calls %d", w.Code, e.edge.calls())
+		}
+		a := e.st.auditEntries()
+		if len(a) != 1 || a[0].Action != "edge.tenant.restart" || a[0].Target != "42" || a[0].Detail != `{"downstream":"edge:edge-01"}` {
+			t.Errorf("audit = %+v", a)
+		}
+		// 別のエッジには別の下流の名前。同じ鍵を別のエッジに使うと 422（aka-ossbss は鍵をエッジごとに分ける）。
+		e.do(http.MethodPost, "/admin/v2/edges/edge-02/tenants/42/restart", hdr("k-2"), "")
+		if e.edge2.calls() != 1 || e.edge.calls() != 2 {
+			t.Errorf("calls = %d %d", e.edge.calls(), e.edge2.calls())
+		}
+		if w := e.do(http.MethodPost, "/admin/v2/edges/edge-02/tenants/42/restart", hdr("k-1"), ""); w.Code != 422 {
+			t.Errorf("same key on another edge = %d", w.Code)
+		}
+	})
+
+	t.Run("下流の再送の印を中継する", func(t *testing.T) {
+		e := newEnv(t)
+		e.ca.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+			return downstream.RelayResponse{Status: 200, ContentType: "application/json", IdempotentReplayed: "true", Body: []byte(`{}`)}, nil
+		}
+		w := e.do(http.MethodPost, "/admin/v2/ca/cas/tenant.a/disable", hdr("k-1"), "")
+		if w.Header().Get("Idempotent-Replayed") != "true" {
+			t.Errorf("header = %v", w.Header())
+		}
+	})
+
+	t.Run("下流の IDEMPOTENCY_CONFLICT は覚えない", func(t *testing.T) {
+		e := newEnv(t)
+		e.ca.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+			return downstream.RelayResponse{Status: 409, ContentType: "application/problem+json",
+				Body: []byte(`{"title":"Conflict","status":409,"cause":"IDEMPOTENCY_CONFLICT"}`)}, nil
+		}
+		p := problemOf(t, e.do(http.MethodPost, "/admin/v2/ca/certs", hdr("k-1"), `{}`), 409)
+		if p.Cause != "IDEMPOTENCY_CONFLICT" || p.Downstream != "ca" {
+			t.Errorf("conflict = %+v", p)
+		}
+		e.ca.relay = nil
+		if w := e.do(http.MethodPost, "/admin/v2/ca/certs", hdr("k-1"), `{}`); w.Code != 200 || w.Header().Get("Idempotent-Replayed") != "" || e.ca.calls() != 2 {
+			t.Errorf("retry = %d %v, calls %d", w.Code, w.Header(), e.ca.calls())
+		}
+		// ほかの 409 は覚える。
+		e.ca.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+			return downstream.RelayResponse{Status: 409, ContentType: "application/problem+json",
+				Body: []byte(`{"title":"Conflict","status":409,"cause":"CA_EXISTS"}`)}, nil
+		}
+		e.do(http.MethodPost, "/admin/v2/ca/cas", hdr("k-2"), `{}`)
+		if w := e.do(http.MethodPost, "/admin/v2/ca/cas", hdr("k-2"), `{}`); w.Code != 409 || w.Header().Get("Idempotent-Replayed") != "true" {
+			t.Errorf("other 409 = %d %v", w.Code, w.Header())
+		}
+	})
+
+	t.Run("登録簿にない下流", func(t *testing.T) {
+		e := newEnv(t)
+		e.names = []downstream.Name{downstream.Vecgen, downstream.Radius}
+		// radsec-ca がなければ 503（書き込みも覚えない）。
+		for _, c := range []struct {
+			method, path string
+			key          map[string]string
+		}{{http.MethodGet, "/admin/v2/ca/status", nil}, {http.MethodPost, "/admin/v2/ca/certs", hdr("k-1")}} {
+			p := problemOf(t, e.do(c.method, c.path, c.key, ""), 503)
+			if p.Cause != causeDownstreamUnavailable || p.Downstream != "ca" {
+				t.Errorf("%s: %+v", c.path, p)
+			}
+		}
+		// 登録簿にないエッジは 404。
+		p := problemOf(t, e.do(http.MethodPut, "/admin/v2/edges/edge-01/tenants/42", hdr("k-2"), `{}`), 404)
+		if p.Cause != causeEdgeNotFound || p.Downstream != "edge:edge-01" {
+			t.Errorf("edge = %+v", p)
+		}
+		// 足して読み直すと、同じキーでやり直せる。
+		e.names = append(e.names, downstream.CA, edge01)
+		if w := e.do(http.MethodPost, "/admin/v2/ca/certs", hdr("k-1"), ""); w.Code != 200 {
+			t.Errorf("ca after adding = %d %s", w.Code, w.Body)
+		}
+		if w := e.do(http.MethodPut, "/admin/v2/edges/edge-01/tenants/42", hdr("k-2"), `{}`); w.Code != 200 {
+			t.Errorf("edge after adding = %d %s", w.Code, w.Body)
+		}
+	})
 }
 
 func TestIdempotency(t *testing.T) {
@@ -483,10 +700,19 @@ func TestStatus(t *testing.T) {
 	e.radius.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
 		return downstream.RelayResponse{}, errors.New("dial tcp: connection refused")
 	}
+	e.ca.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{Status: 200, ContentType: "application/json", Body: []byte(`{"service":"radsec-ca"}`)}, nil
+	}
+	e.edge.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{Status: 200, ContentType: "application/json", Body: []byte(`{"mode":"managed"}`)}, nil
+	}
+	e.edge2.relay = func(downstream.RelayRequest) (downstream.RelayResponse, error) {
+		return downstream.RelayResponse{}, errors.New("dial tcp: connection refused")
+	}
 	// 集める前は、つながるかが分からない（reachable false、checkedAt なし）。
 	out := decode[map[string]any](t, e.do(http.MethodGet, "/admin/v2/status", nil, ""), 200)
 	ds := out["downstreams"].([]any)
-	if len(ds) != 2 || ds[0].(map[string]any)["reachable"] != false || ds[0].(map[string]any)["checkedAt"] != nil {
+	if len(ds) != 5 || ds[0].(map[string]any)["reachable"] != false || ds[0].(map[string]any)["checkedAt"] != nil {
 		t.Errorf("before poll = %v", ds)
 	}
 
@@ -508,8 +734,34 @@ func TestStatus(t *testing.T) {
 	}
 	// つながらなくなったときだけログを出す（2 回目は出さない）。
 	e.poller.PollOnce(t.Context())
-	if n := strings.Count(e.logs.String(), `"event_id":"DOWNSTREAM_UNREACHABLE"`); n != 1 {
+	if n := strings.Count(e.logs.String(), `"event_id":"DOWNSTREAM_UNREACHABLE"`); n != 2 {
 		t.Errorf("DOWNSTREAM_UNREACHABLE logged %d times", n)
+	}
+	// radsec-ca とエッジも出す。接続していないエッジは証明書を省く。読み直しで消えたエッジは出さない。
+	ca, edge, edge2 := ds[2].(map[string]any), ds[3].(map[string]any), ds[4].(map[string]any)
+	if ca["name"] != "ca" || ca["url"] != "https://radsec-ca:9448" || ca["status"].(map[string]any)["service"] != "radsec-ca" ||
+		ca["serverCertificate"].(map[string]any)["subject"] != "CN=radsec-ca" {
+		t.Errorf("ca = %v", ca)
+	}
+	if edge["name"] != "edge:edge-01" || edge["reachable"] != true || edge["status"].(map[string]any)["mode"] != "managed" || edge["serverCertificate"] != nil {
+		t.Errorf("edge = %v", edge)
+	}
+	if edge2["name"] != "edge:edge-02" || edge2["reachable"] != false {
+		t.Errorf("edge2 = %v", edge2)
+	}
+	e.edge.cert = testCert(t, "edge-01")
+	ds = decode[map[string]any](t, e.do(http.MethodGet, "/admin/v2/status", nil, ""), 200)["downstreams"].([]any)
+	if c := ds[3].(map[string]any)["serverCertificate"].(map[string]any); c["subject"] != "CN=edge-01" {
+		t.Errorf("edge certificate = %v", c)
+	}
+	e.names = []downstream.Name{downstream.Vecgen, downstream.Radius, downstream.CA, edge01}
+	e.poller.PollOnce(t.Context())
+	ds = decode[map[string]any](t, e.do(http.MethodGet, "/admin/v2/status", nil, ""), 200)["downstreams"].([]any)
+	if len(ds) != 4 {
+		t.Errorf("after removing an edge = %v", ds)
+	}
+	if _, ok := e.poller.result(edge02); ok {
+		t.Error("the result of the removed edge remains")
 	}
 	if !strings.Contains(e.logs.String(), `"event_id":"DOWNSTREAM_REACHABLE"`) {
 		t.Error("no DOWNSTREAM_REACHABLE log")

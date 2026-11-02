@@ -5,7 +5,9 @@ import (
 	"crypto/x509"
 	"encoding/json/jsontext"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -64,11 +66,12 @@ func certInfo(c *x509.Certificate) certJSON {
 	return certJSON{Subject: c.Subject.String(), NotAfter: c.NotAfter, Fingerprint: certs.Fingerprint(c)}
 }
 
-// downstreamJSON は下流ごとの状態。Status は下流の /status の本文を解釈せずにそのまま入れる（U8）。
+// downstreamJSON は下流ごとの状態。Status は下流の /status の本文を解釈せずにそのまま入れる（U8・P11）。
+// ServerCertificate は、serverFingerprint で照合するエッジでは接続のときに受け取った証明書で、まだ接続していなければ省く（P3）。
 type downstreamJSON struct {
 	Name              string         `json:"name"`
 	URL               string         `json:"url"`
-	ServerCertificate certJSON       `json:"serverCertificate"`
+	ServerCertificate certJSON       `json:"serverCertificate,omitzero"`
 	Reachable         bool           `json:"reachable"`
 	CheckedAt         time.Time      `json:"checkedAt,omitzero"`
 	Error             string         `json:"error,omitempty"`
@@ -95,8 +98,12 @@ func (h *Handler) getStatus(w http.ResponseWriter, r *http.Request) {
 	out.DownstreamsLoadedAt = s.DownstreamsLoadedAt()
 	out.ClientCertificate = certInfo(s.ClientCertificate())
 	out.ServerCertificate = certInfo(s.ServerCertificate())
-	for _, name := range relayNames {
+	for _, name := range s.Poller.Names() {
 		c := h.Downstream(name)
+		// 読み直しで消えたエッジは出さない。
+		if c == nil {
+			continue
+		}
 		d := downstreamJSON{Name: string(name), URL: c.BaseURL(), ServerCertificate: certInfo(c.ServerCertificate())}
 		if res, ok := s.Poller.result(name); ok {
 			d.Reachable, d.CheckedAt, d.Error, d.Hint, d.Status = res.reachable, res.checkedAt, res.err, res.hint, res.body
@@ -108,6 +115,9 @@ func (h *Handler) getStatus(w http.ResponseWriter, r *http.Request) {
 
 // Poller は下流の /status を定期に集めて覚えておく（設計概要 §9）。
 type Poller struct {
+	// Names は登録簿の今の下流の名前を返す。
+	Names func() []downstream.Name
+	// Downstream は下流の名前から中継のクライアントを返す。登録簿になければ nil。
 	Downstream func(downstream.Name) Relayer
 	Log        *slog.Logger
 
@@ -141,17 +151,29 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 // PollOnce は全下流の /status を並べて 1 回ずつ呼ぶ。つながらなくなったとき（DOWNSTREAM_UNREACHABLE）と、
 // またつながったとき（DOWNSTREAM_REACHABLE）にログを出す（30 秒ごとに同じログを出さない）。
 func (p *Poller) PollOnce(ctx context.Context) {
+	names := p.Names()
+	// 読み直しで消えた下流の結果を忘れる（足し直したときに、最初の状態のログを出すように）。
+	p.mu.Lock()
+	maps.DeleteFunc(p.results, func(n downstream.Name, _ pollResult) bool { return !slices.Contains(names, n) })
+	p.mu.Unlock()
 	var wg sync.WaitGroup
-	for _, name := range relayNames {
+	for _, name := range names {
 		wg.Go(func() { p.poll(ctx, name) })
 	}
 	wg.Wait()
 }
 
 func (p *Poller) poll(ctx context.Context, name downstream.Name) {
+	c := p.Downstream(name)
+	if c == nil {
+		return
+	}
 	traceID := trace.New()
 	res := pollResult{checkedAt: time.Now().UTC()}
-	resp, err := p.Downstream(name).Relay(trace.With(ctx, traceID), downstream.RelayRequest{Method: http.MethodGet, Path: []string{"status"}})
+	// radsec-ca とエッジのタイムアウト（30 秒）は待たない（P4）。
+	ctx, cancel := context.WithTimeout(ctx, downstream.StatusTimeout)
+	defer cancel()
+	resp, err := c.Relay(trace.With(ctx, traceID), downstream.RelayRequest{Method: http.MethodGet, Path: []string{"status"}})
 	switch {
 	case err != nil:
 		res.err, res.hint = err.Error(), downstream.Diagnose(name, err)
