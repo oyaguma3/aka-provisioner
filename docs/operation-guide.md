@@ -11,22 +11,24 @@
 |---|---|
 | `aka-provisioner` | 中継。UID 65532 で動く（distroless）。`docker compose ps` で healthy なら、専用の Valkey に届いている |
 | `valkey` | `Idempotency-Key` の記録（24 時間）と監査ログの Stream。AOF を書き込みごとに同期する。ホストにもほかのプロジェクトにもポートを公開しない |
-| `fluent-bit` | 管理面のログをアプリごとのファイル（`logs_on_host/`）に書く。aka-ossbss のログも受ける（5 章） |
+| `fluent-bit` | 管理面のログをアプリごとのファイル（`logs_on_host/`）に書く。aka-ossbss と radsec-ca のログも受ける（5 章） |
 
 | 口 | ポート | つなぐ相手 | 認証 |
 |---|---|---|---|
 | API | 9446 | aka-ossbss（同じ VPS の共有の Docker ネットワーク `aka-provisioner`） | mTLS。管理クライアントのピン（ファイル） |
 | healthcheck | `127.0.0.1:9090`（コンテナの中） | コンテナの中だけ | なし（Valkey に届くか） |
 | 下流への接続 | aka-vecgen の 9443、aka-radius の 9444 | データ面の VPS（サービス用の WireGuard） | mTLS。1 つのクライアント証明書を全下流に登録する |
+| 下流への接続 | radsec-ca の 9448 | 同じ VPS（共有の Docker ネットワーク `aka-provisioner`） | 同上 |
+| 下流への接続 | エッジの 9447 | エッジの VPS（サービス用の WireGuard） | 同上。エッジのサーバー証明書はフィンガープリントで照合する |
 
 ```
 [aka-ossbss] ──mTLS（aka-provisioner）──> 9446 aka-provisioner ── Valkey
                                                ├─mTLS（WireGuard）─> aka-vecgen 9443
-                                               └─mTLS（WireGuard）─> aka-radius 9444
+                                               ├─mTLS（WireGuard）─> aka-radius 9444
+                                               ├─mTLS（aka-provisioner）─> radsec-ca 9448
+                                               └─mTLS（WireGuard）─> エッジ 9447（複数台）
 [運用者] ──SSH（運用用の WireGuard と踏み台）──> コマンド（check-downstream、gen-client-cert など）
 ```
-
-radsec-ca とエッジへの中継は、段階 4-2 で足す。
 
 ノードの上に置くもの（`compose.yaml` のあるディレクトリ）:
 
@@ -99,7 +101,9 @@ radsec-ca とエッジへの中継は、段階 4-2 で足す。
 
 ## 3. 下流とつなぐ
 
-aka-provisioner は 1 つのクライアント証明書で全下流につなぐ。下流の側では aka-provisioner を管理クライアントとして登録し、aka-provisioner の側では下流のサーバー証明書を信頼の起点にする。
+aka-provisioner は 1 つのクライアント証明書で全下流につなぐ。下流の側では aka-provisioner を管理クライアントとして登録し、aka-provisioner の側では下流のサーバー証明書を信頼の起点にする（エッジだけはフィンガープリントで照合する。3.6）。
+
+radsec-ca とエッジは登録簿で省略できる。aka-vecgen・aka-radius をつないで aka-provisioner を起動してから、3.5・3.6 の手順で足す（radsec-ca は aka-provisioner が作る共有のネットワークに入るので、aka-provisioner が先に動いている必要がある）。
 
 ### 3.1 クライアント証明書と登録簿
 
@@ -147,11 +151,69 @@ aka-provisioner は 1 つのクライアント証明書で全下流につなぐ�
 
 ### 3.3 下流のサーバー証明書が変わったとき
 
-下流がサーバー証明書を作り直したら（aka-vecgen の `admin-cert reset`、aka-radius の `admin-cert create -force`）、`downstreams/` のファイルを差し替えて `docker compose kill -s HUP aka-provisioner` を送る。**差し替えるまでの間、その下流への中継は 503 になる。** 下流の `SIGHUP` と続けて行う。
+下流がサーバー証明書を作り直したら（aka-vecgen の `admin-cert reset`、aka-radius の `admin-cert create -force`、radsec-ca の `replace-server-cert`。エッジの `replace-server-cert` は 3.6）、`downstreams/` のファイルを差し替えて `docker compose kill -s HUP aka-provisioner` を送る。**差し替えるまでの間、その下流への中継は 503 になる。** 下流の `SIGHUP` と続けて行う。
 
 ### 3.4 同じホストで試すとき
 
 本番の下流は別の VPS にある。同じホストで試すときは、`.env` の `COMPOSE_FILE` に `compose.aka-radius-admin.yaml`・`compose.aka-av.yaml` を足して下流の共有ネットワークに入り、`https://aka-radius-admin:9444/admin/v2`・`https://aka-vecgen:9443/admin/v2` でつなぐ（下流を先に起動する）。aka-radius の Fluent Bit と同じホストに置くときは `PROVISIONER_FLUENT_BIT_PORT` を変える。
+
+### 3.5 radsec-ca を足す
+
+radsec-ca は同じ VPS の compose で動かし（`compose.managed.yaml` を重ねる。radsec-ca の運用ガイド 3 章）、共有の Docker ネットワーク `aka-provisioner` で受ける。足すまでの間、`/admin/v2/ca/...` は 503（`DOWNSTREAM_UNAVAILABLE`）になる。
+
+1. aka-provisioner のクライアント証明書の 1 行（`provisioner=<フィンガープリント>`。忘れたら `check-downstream` の先頭に出る）を、radsec-ca の `secrets/admin-clients` に書き、radsec-ca を起動する。
+2. radsec-ca のサーバー証明書を、aka-provisioner の `downstreams/` に置く（radsec-ca のディレクトリで取り出す。ファイルは UID 65532 で読めるようにする）。
+
+   ```bash
+   docker compose exec -T radsec-ca /radsec-ca server-cert | sudo tee /opt/aka-provisioner/downstreams/ca-admin.pem > /dev/null
+   ```
+
+3. 登録簿に `ca` を足し、読み直す。サーバー証明書の SAN にある名前でつなぐ（`CA_TLS_HOSTS`。管理モードの既定は `radsec-ca`）。URL に接頭辞は付けない。
+
+   ```json
+   "ca": { "url": "https://radsec-ca:9448", "serverCert": "ca-admin.pem" }
+   ```
+
+   ```bash
+   docker compose kill -s HUP aka-provisioner
+   ```
+
+4. `check-downstream` で確かめる。radsec-ca のログを管理面の Fluent Bit に送るときは、radsec-ca の `compose.fluent-bit.yaml` を重ねる（5 章）。
+
+radsec-ca が `replace-server-cert` でサーバー証明書を作り直したら、2 の手順で差し替えて読み直す（3.3）。
+
+### 3.6 エッジを足す
+
+エッジは VPS ごとに 1 つの ID で登録簿に書く（2 台以上）。エッジのサーバー証明書は、SAN ではなくフィンガープリントで照合する。登録簿にないエッジへの要求は 404（`EDGE_NOT_FOUND`）になる。
+
+1. エッジの導入（radsec-edge の運用ガイド 10 章）で、aka-provisioner のクライアント証明書の 1 行をエッジの `secrets/admin-clients` に書く。
+2. エッジのサーバー証明書のフィンガープリントを調べる（エッジの VPS で）。
+
+   ```bash
+   docker compose exec -T radsec-edge /radsec-edge server-cert | openssl x509 -noout -fingerprint -sha256
+   ```
+
+3. 登録簿の `edges` に足し、読み直す。`id` は小文字の英数字と `-`（`/admin/v2/edges/<id>/...` になる。重複は誤り）。`url` はトンネルの中のアドレスで、接頭辞は付けない。`serverFingerprint` は 2 の出力をそのまま書ける。
+
+   ```json
+   "edges": [
+     { "id": "edge-01", "url": "https://10.20.0.21:9447", "serverFingerprint": "AB:CD:…" }
+   ]
+   ```
+
+   ```bash
+   docker compose kill -s HUP aka-provisioner
+   ```
+
+4. `check-downstream` で確かめる（`edge:edge-01` の行）。受け取ったサーバー証明書の主体と期限は `/status` の `downstreams[].serverCertificate` に出る。
+
+- エッジを外すときは、そのエッジのテナントを別のエッジに移してから、`edges` から行を消して読み直す。読み直しの後は `/status` に出なくなる。
+- エッジが `replace-server-cert` でサーバー証明書を作り直したら、`serverFingerprint` を新しい値に改めて読み直す。**改めるまでの間、そのエッジへの中継は 503 になる。** エッジの `SIGHUP` と続けて行う。
+- 1 台でも届かないエッジがあると、`check-downstream` は失敗で終わる（ほかの下流の結果も表示する）。その間も、ほかの下流への中継は動く。
+
+### 3.7 タイムアウト
+
+下流の 1 回の呼び出しのタイムアウトは、aka-vecgen・aka-radius が `PROVISIONER_DOWNSTREAM_TIMEOUT`（既定 5 秒）、radsec-ca とエッジが `PROVISIONER_RADSEC_TIMEOUT`（既定 30 秒）である（どちらも 30 秒まで）。radsec-ca の持ち込みの CA の CRL の取得（上限は radsec-ca の `CA_BROUGHT_CRL_TIMEOUT`、既定 20 秒）と、エッジの `crl:refresh`（全体で 25 秒まで）に合わせている。`/status` を集めるときと `check-downstream` は、どの下流も 10 秒で打ち切る。
 
 ## 4. 管理クライアント
 
@@ -230,6 +292,9 @@ aka-provisioner の compose が管理面の Fluent Bit を動かす。Docker の
 |---|---|
 | `provisioner.log`・`provisioner-valkey.log` | aka-provisioner とその Valkey |
 | `ossbss.log`・`ossbss-postgres.log`・`ossbss-cloudflared.log` | aka-ossbss とその PostgreSQL・cloudflared（aka-ossbss の `compose.fluent-bit.yaml` を重ねたとき） |
+| `radsec-ca.log`・`radsec-ca-cloudflared.log` | radsec-ca とその cloudflared（radsec-ca の `compose.fluent-bit.yaml` を重ねたとき） |
+
+エッジは自分の VPS の Fluent Bit に書く（radsec-edge の運用ガイド 10.5）。
 
 ファイルはホストの logrotate で日ごとに圧縮し、2 週間持つ。監視用の PC が取りに行く（運用用の WireGuard と踏み台を通して rsync over SSH）。
 
@@ -268,7 +333,7 @@ aka-provisioner の compose が管理面の Fluent Bit を動かす。Docker の
 | ログ | 中継の要求、断った要求、下流の状態の変化、起動と読み直し、誤り | `logs_on_host/provisioner.log` | ノードで 2 週間（5 章） |
 | 監査ログ | 下流を書き換えた中継（成功したとき） | Valkey の Stream と `audit/` の日ごとのファイル | Stream は `PROVISIONER_AUDIT_MAX` 件（既定 100,000）、ファイルは `PROVISIONER_AUDIT_RETENTION_DAYS` 日（既定 14） |
 
-要求と応答の本文は、ログにも監査ログにも出さない。IMSI はマスクしない（aka-vecgen・aka-radius と同じ。ログを取りに行く監視用の PC の保管とアクセスできる人も、ノードと同じく限る）。
+要求と応答の本文は、ログにも監査ログにも出さない（Ki・OPc のほか、radsec-ca の持ち込みの CA の登録に入る Meraki の API キーも通るだけで残らない）。IMSI はマスクしない（aka-vecgen・aka-radius と同じ。ログを取りに行く監視用の PC の保管とアクセスできる人も、ノードと同じく限る）。
 
 ### 7.1 ログ
 
@@ -282,6 +347,7 @@ JSON（1 行に 1 つ）で出す。どの行にも `event_id` があり、要�
 | `IDEMPOTENT_REPLAYED` | 同じ `Idempotency-Key` の再送に、最初の応答を返した |
 | `DOWNSTREAM_UNREACHABLE` / `DOWNSTREAM_REACHABLE` | 下流につながらなくなった / またつながった（下流の状態は 30 秒ごとに集める。変わったときだけ出る） |
 | `DOWNSTREAM_ERROR` | 下流が ProblemDetails でない誤りを返した（502） |
+| `DOWNSTREAM_NOT_REGISTERED` | 登録簿にない radsec-ca・エッジへの要求を断った（503・404） |
 | `ADMIN_CLIENTS_LOADED` / `ADMIN_CLIENTS_RELOADED` / `ADMIN_CLIENTS_RELOAD_ERR` | ピンのファイルを読んだ / 読み直した / 読み直せず前のまま続ける |
 | `DOWNSTREAMS_LOADED` / `DOWNSTREAMS_RELOADED` / `DOWNSTREAMS_RELOAD_ERR` | 登録簿を読んだ / 読み直した / 読み直せず前のまま続ける |
 | `SERVER_CERT_LOADED` / `SERVER_CERT_RELOADED` / `SERVER_CERT_RELOAD_ERR` | サーバー証明書を読んだ / 読み直した / 読み直せず前のまま続ける |
@@ -295,7 +361,15 @@ JSON（1 行に 1 つ）で出す。どの行にも `event_id` があり、要�
 
 - 日ごとのファイル `audit/audit-YYYYMMDD.jsonl`（日付は日本時間）。項目は `time`・`operator`・`mgmtClient`・`action`・`target`・`detail`・`traceId`・`streamId`（aka-vecgen・aka-radius と同じ）。前の日までのファイルは gzip で圧縮し、持つ日数を過ぎたら消す。どちらも起動のときと 1 時間ごとに行う。監視用の PC が取りに行く。
 - `GET /admin/v2/audit-logs` は Stream を新しい順に返す（aka-ossbss の画面 `/audit/provisioner` で見られる）。
-- `action` は `<下流>.<口>`（`vecgen.subscriber.create`・`update`・`state`・`reinstate`・`delete`、`radius.subscriber.…`）。`detail` は `{"downstream":…,"fields":[本文の項目の名前]}` で、値は残さない。
+- `action` は `<下流の種類>.<口>`。`detail` は `{"downstream":…,"fields":[本文の最上位の項目の名前]}` で、値は残さない（`downstream` はエッジなら `edge:<ID>`）。
+
+  | 下流 | `action` | `target` |
+  |---|---|---|
+  | aka-vecgen・aka-radius | `vecgen.subscriber.create`・`update`・`state`・`reinstate`・`delete`、`radius.subscriber.…` | IMSI |
+  | radsec-ca | `ca.ca.create`・`ca.ca.disable`・`ca.crl.upload`・`ca.crl.refresh`・`ca.crl_source.put` | CA の ID |
+  | radsec-ca | `ca.cert.issue`・`ca.cert.revoke` | シリアル番号 |
+  | エッジ | `edge.tenant.put`・`edge.tenant.delete`・`edge.tenant.apply`・`edge.tenant.restart`・`edge.server_csr.create`・`edge.server_cert.put`・`edge.probe_csr.create`・`edge.probe_cert.put`・`edge.crl.refresh` | テナントの ID |
+
 - 読み出しと一括取得（`POST …/subscribers/batch-get`）は残さない。下流が断った要求（4xx・5xx）も残さない。
 - 一括投入では 1 行ごとに残る（1 回 1 万件）。Stream は件数の上限で古いものから押し出されるので、長く残すのはファイルのほうである。
 - ファイルに書けなかったときは、中継は成功のまま返し、ログに `AUDIT_WRITE_ERR` を出す。このログは監視で拾う（`audit/` の空きと権限を確かめる）。
@@ -315,7 +389,7 @@ aka-ossbss が `X-Trace-ID` で渡した値を、aka-provisioner のログ（`tr
    sudo sh -c "grep -h '\"traceId\":\"<トレースID>\"' audit/audit-*.jsonl; zgrep -h '\"traceId\":\"<トレースID>\"' audit/audit-*.jsonl.gz"
    ```
 
-3. 下流で同じトレースID を探す（aka-vecgen の運用ガイド 8.3、aka-radius の運用ガイド 9.3）。
+3. 下流で同じトレースID を探す（aka-vecgen の運用ガイド 8.3、aka-radius の運用ガイド 9.3、radsec-ca の監査ログのファイル `audit/`、エッジの監査ログのファイル `EDGE_HOST_DIR/audit`）。radsec-ca とエッジは英数字と `-` だけのトレースID を受け取る（ほかの文字があると別の ID を採番するので、追跡が切れる）。
 
 ## 8. バックアップと戻し
 
@@ -379,10 +453,11 @@ PROVISIONER_VERSION=$(git rev-parse --short HEAD) docker compose build
 | `docker compose ps` で unhealthy | 専用の Valkey に届かない。`docker compose exec aka-provisioner /aka-provisioner healthcheck`、`docker compose logs valkey` |
 | 「…が provisioner のクライアント証明書を受け付けませんでした」「…が接続を切りました」 | 下流のピンのファイルに、`check-downstream` が出すフィンガープリントがあるか。書いた後に下流へ `SIGHUP` を送ったか。証明書の期限。下流のログの `ADMIN_CLIENT_REJECTED` |
 | 「…のサーバー証明書が、登録簿の serverCert と一致しません」 | 下流がサーバー証明書を作り直していないか（3.3） |
+| 「…のサーバー証明書のフィンガープリントが、登録簿の serverFingerprint と一致しません」 | エッジがサーバー証明書を作り直していないか。`serverFingerprint` の書き誤り（3.6） |
 | 「…のサーバー証明書の SAN に…入っていません」 | 下流のサーバー証明書の SAN に、登録簿の `url` のホスト名か IP があるか |
 | 「…のサーバー証明書が有効期間外です」 | 下流で作り直す（3.3） |
 | 「…のホスト名…を解決できません」 | 同じホストの試しでは、下流が動いているか、共有ネットワークに入っているか（3.4） |
-| 「…に接続できません」「…から時間内に応答がありません」 | 下流が動いているか、登録簿の `url`、WireGuard の経路、下流の公開先（`VECGEN_ADMIN_PUBLISH`・`RADIUS_ADMIN_BIND`）と nftables。タイムアウトは `PROVISIONER_DOWNSTREAM_TIMEOUT` |
+| 「…に接続できません」「…から時間内に応答がありません」 | 下流が動いているか、登録簿の `url`、WireGuard の経路、下流の公開先（`VECGEN_ADMIN_PUBLISH`・`RADIUS_ADMIN_BIND`・`EDGE_BIND_ADDR`）と nftables。タイムアウトは文の中の環境変数（3.7）。radsec-ca は共有のネットワークに入っているか |
 | `network … declared as external, but could not be found` | 同じホストの試しで、下流を先に起動しているか。本番では `COMPOSE_FILE` から重ね合わせを外す |
 | 下流の `docker compose down` で `Network … Resource is still in use` | aka-provisioner が共有ネットワークに入っているため、ネットワークが残っただけで問題はない |
 | 管理クライアントが接続できない（TLS のハンドシェイクで切れる。curl は終了コード 56） | ログの `ADMIN_CLIENT_REJECTED` の `reason`（`not configured` はピンにない、`outside validity period` は期限切れ）と `fingerprint` |
@@ -398,8 +473,15 @@ API の誤り（ProblemDetails の `cause`）:
 | 400 `MANDATORY_IE_MISSING` | 書き込みに `Idempotency-Key` がない | 呼び出し側 |
 | 409 `OPERATION_IN_PROGRESS` | 同じ `Idempotency-Key` の要求が処理中 | 少し待って送り直す（処理中の記録は 60 秒で消える） |
 | 422 `IDEMPOTENCY_KEY_MISMATCH` | 同じ `Idempotency-Key` で内容が違う | 呼び出し側 |
-| 503 `DOWNSTREAM_UNAVAILABLE` | 応答の `downstream` の下流につながらない | `check-downstream` |
+| 503 `DOWNSTREAM_UNAVAILABLE` | 応答の `downstream` の下流につながらない。radsec-ca が登録簿にない | `check-downstream`、登録簿の `ca`（3.5） |
+| 404 `EDGE_NOT_FOUND` | 登録簿にないエッジ | 登録簿の `edges`（3.6）。読み直しを送ったか。足した後は同じキーでやり直せる |
 | 502 `DOWNSTREAM_ERROR` | 下流が ProblemDetails でない誤りを返した | ログの `DOWNSTREAM_ERROR`、下流のログ |
 | 500 `SYSTEM_FAILURE` | 専用の Valkey に届かない | `docker compose ps valkey`。書き込みは断る |
 
-下流の誤り（`downstream` つきの `cause`）は、そのまま中継している。意味は下流の管理API の仕様を見る。
+下流の誤り（`downstream` つきの `cause`）は、そのまま中継している。意味は下流の管理API の仕様を見る。主なもの:
+
+| 状態の符号と `cause` | 意味 | 確かめること |
+|---|---|---|
+| 503 `TENANT_BUSY`（エッジ） | 反映などが動いている。`Retry-After` をそのまま返す | 少し待って同じキーでやり直す（5xx は覚えない） |
+| 409 `IDEMPOTENCY_CONFLICT`（radsec-ca・エッジ） | 下流が同じキーの別の要求か、処理中の要求を覚えている。aka-provisioner は覚えない | 下流が処理を終えるのを待って、同じキーでやり直す。別の内容なら新しいキーにする |
+| 422 `NOT_READY`・`TENANT_STOPPED`（エッジ） | 証明書が足りない・エッジの画面でテナントが止まっている | `GET …/tenants/{tenantId}` の `missing`。やり直しは新しいキー（4xx は覚える） |

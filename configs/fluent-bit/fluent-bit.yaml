@@ -55,3 +55,16 @@ pipeline:
       path: /output_logs
       file: ossbss-cloudflared.log
       format: plain
+
+    # 管理面の radsec-ca とその cloudflared（radsec-ca の compose.fluent-bit.yaml を重ねたとき。エッジは自分の Fluent Bit を持つので足さない）
+    - name: file
+      match: app.radsec-ca
+      path: /output_logs
+      file: radsec-ca.log
+      format: plain
+
+    - name: file
+      match: app.radsec-ca-cloudflared
+      path: /output_logs
+      file: radsec-ca-cloudflared.log
+      format: plain

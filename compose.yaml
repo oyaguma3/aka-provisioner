@@ -1,5 +1,5 @@
 # aka-provisioner（管理面のノード）。aka-provisioner・専用の Valkey・管理面の Fluent Bit を動かす（設計概要 §12）。
-# 管理面の aka-ossbss（と段階 4 の radsec-ca）のログも、この Fluent Bit に送る（それぞれの compose.fluent-bit.yaml を重ねる）。
+# 管理面の aka-ossbss と radsec-ca のログも、この Fluent Bit に送る（それぞれの compose.fluent-bit.yaml を重ねる）。
 
 x-logging: &fluent-bit-logging
   driver: fluentd
@@ -36,6 +36,7 @@ services:
       PROVISIONER_ADMIN_CLIENTS_FILE: /run/secrets/admin-clients
       PROVISIONER_DOWNSTREAMS_FILE: /etc/aka-provisioner/downstreams/downstreams.json
       PROVISIONER_DOWNSTREAM_TIMEOUT: ${PROVISIONER_DOWNSTREAM_TIMEOUT:-5s}
+      PROVISIONER_RADSEC_TIMEOUT: ${PROVISIONER_RADSEC_TIMEOUT:-30s}
       PROVISIONER_VALKEY_ADDR: valkey:6379
       PROVISIONER_VALKEY_PASSWORD: ${PROVISIONER_VALKEY_PASSWORD:?.env に PROVISIONER_VALKEY_PASSWORD を設定してください}
       PROVISIONER_AUDIT_MAX: ${PROVISIONER_AUDIT_MAX:-100000}
@@ -62,6 +63,7 @@ services:
     networks:
       - default
       # 同一ホストの管理クライアント（aka-ossbss）は、この共有ネットワークに参加して https://aka-provisioner:9446 で接続する。
+      # 同じノードの radsec-ca もこのネットワークに入る（aka-provisioner から https://radsec-ca:9448 でつなぐ）。
       - shared
     logging:
       <<: *fluent-bit-logging

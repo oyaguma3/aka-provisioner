@@ -196,12 +196,52 @@ jobs:
           docker compose up -d --wait --wait-timeout 120
           test "$(v GET ci:marker)" = before
           $A --fail-with-body --retry 10 --retry-delay 2 --retry-all-errors https://localhost:9446/admin/v2/status | jq -e '.valkey.reachable'
+      - name: radsec-ca とエッジの足し方（運用ガイド 3.5・3.6）
+        run: |
+          A="curl -sS --cacert $RUNNER_TEMP/server.pem --cert $RUNNER_TEMP/ossbss-new.pem --key $RUNNER_TEMP/ossbss-new.key"
+          U=https://localhost:9446/admin/v2
+          # 足す前は、radsec-ca は 503、エッジは 404
+          $A $U/ca/status | jq -e '.cause == "DOWNSTREAM_UNAVAILABLE" and .downstream == "ca"'
+          $A $U/edges/edge-01/status | jq -e '.cause == "EDGE_NOT_FOUND" and .downstream == "edge:edge-01"'
+          # 下流は立てない（届かない宛先。実物とのやり取りは「下流との契約の試験」で確かめる）
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=radsec-ca \
+            -keyout "$RUNNER_TEMP/ca.key" -out "$RUNNER_TEMP/ca-admin.pem" 2>/dev/null
+          sudo cp "$RUNNER_TEMP/ca-admin.pem" downstreams/ca-admin.pem
+          fp=$(openssl x509 -in "$RUNNER_TEMP/ca-admin.pem" -noout -fingerprint -sha256 | cut -d= -f2)
+          sudo jq --arg fp "$fp" '. + {ca: {url: "https://127.0.0.1:3", serverCert: "ca-admin.pem"}, edges: [{id: "edge-01", url: "https://127.0.0.1:4", serverFingerprint: $fp}]}' \
+            downstreams/downstreams.json | sudo tee "$RUNNER_TEMP/downstreams.json" > /dev/null
+          sudo cp "$RUNNER_TEMP/downstreams.json" downstreams/downstreams.json
+          docker compose kill -s HUP aka-provisioner
+          sleep 1
+          $A $U/status | jq -e '[.downstreams[].name] == ["vecgen", "radius", "ca", "edge:edge-01"]'
+          # 届かない下流は 503、登録簿にないエッジは 404、パスの値の形は 400
+          $A -H 'Idempotency-Key: guide-1' -X POST $U/edges/edge-01/tenants/42/apply | jq -e '.cause == "DOWNSTREAM_UNAVAILABLE" and .downstream == "edge:edge-01"'
+          $A $U/edges/edge-02/status | jq -e '.cause == "EDGE_NOT_FOUND"'
+          $A $U/edges/edge-01/tenants/acme | jq -e '.cause == "MANDATORY_IE_INCORRECT"'
+          $A $U/ca/cas/acme | jq -e '.cause == "MANDATORY_IE_INCORRECT"'
+          # 形の違う登録簿（ID の重複）は読み直せず、前のまま続ける
+          sudo jq '.edges += .edges' downstreams/downstreams.json | sudo tee "$RUNNER_TEMP/dup.json" > /dev/null
+          sudo cp downstreams/downstreams.json "$RUNNER_TEMP/good.json"
+          sudo cp "$RUNNER_TEMP/dup.json" downstreams/downstreams.json
+          docker compose kill -s HUP aka-provisioner
+          sleep 1
+          $A $U/status | jq -e '.downstreams | length == 4'
+          sudo cp "$RUNNER_TEMP/good.json" downstreams/downstreams.json
       - name: Fluent Bit のファイル
         run: |
+          # radsec-ca の compose.fluent-bit.yaml のタグのログは、タグごとのファイルに書く
+          for tag in radsec-ca radsec-ca-cloudflared; do
+            docker run --rm --log-driver fluentd --log-opt "fluentd-address=localhost:24224" --log-opt "tag=app.$tag" \
+              busybox:1.37.0 echo "{\"msg\":\"guide $tag\"}"
+          done
           sleep 3
           sudo grep -q '"event_id":"ADMIN_REQUEST"' logs_on_host/provisioner.log
           sudo grep -q '"event_id":"ADMIN_CLIENTS_RELOADED"' logs_on_host/provisioner.log
           sudo grep -q '"event_id":"ADMIN_CLIENT_REJECTED"' logs_on_host/provisioner.log
+          sudo grep -q '"event_id":"DOWNSTREAMS_RELOAD_ERR"' logs_on_host/provisioner.log
+          sudo grep -q '"event_id":"DOWNSTREAM_NOT_REGISTERED"' logs_on_host/provisioner.log
+          sudo grep -q 'guide radsec-ca"' logs_on_host/radsec-ca.log
+          sudo grep -q 'guide radsec-ca-cloudflared"' logs_on_host/radsec-ca-cloudflared.log
       - name: compose のログ（失敗時）
         if: failure()
         run: docker compose logs --no-color || true

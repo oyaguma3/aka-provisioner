@@ -5,25 +5,27 @@
 
 > このリポジトリは、VPS に分けて置いて顧客を収容する **MVP セット**（[aka-mvpset](https://github.com/oyaguma3/aka-mvpset)）の、管理面の中継のノードです。PoC セット（[eapaka-pocset](https://github.com/oyaguma3/eapaka-pocset) の `pocset-v1.0.1`）の [eapaka-node-provisioner](https://github.com/oyaguma3/eapaka-node-provisioner) の履歴を引き継いで作りました（もとのコミット `0ca238d`）。
 >
-> MVP のための改修は、[設計概要](docs/design-overview.md)のとおりに MVP セットの段階 3・4 で行っています。段階 3-1 で、加入者の統合操作と補償をなくし、許した口だけを通す中継（`/admin/v2`）にしました。radsec-ca とエッジへの中継は段階 4-2 で足します。
+> MVP のための改修は、[設計概要](docs/design-overview.md)のとおりに MVP セットの段階 3・4 で行っています。段階 3-1 で、加入者の統合操作と補償をなくし、許した口だけを通す中継（`/admin/v2`）にしました。段階 4-2 で radsec-ca とエッジへの中継を足しました。
 
-管理面の aka-ossbss から、下流（[aka-vecgen](https://github.com/oyaguma3/aka-vecgen) と [aka-radius](https://github.com/oyaguma3/aka-radius) の管理API 2.0.0）への変更の経路を 1 つにまとめる中継です（コマンド名 `aka-provisioner`）。
+管理面の aka-ossbss から、下流（[aka-vecgen](https://github.com/oyaguma3/aka-vecgen) と [aka-radius](https://github.com/oyaguma3/aka-radius) の管理API 2.0.0、[radsec-ca](https://github.com/oyaguma3/radsec-ca) と [エッジ](https://github.com/oyaguma3/radsec-edge) の管理API）への変更の経路を 1 つにまとめる中継です（コマンド名 `aka-provisioner`）。
 
 ```
 [aka-ossbss] ──mTLS（X-Operator-Id / X-Trace-ID / Idempotency-Key）──> [aka-provisioner] ── Valkey（専用。冪等と監査ログ）
                                                                           ├─mTLS（サービス用の WireGuard）─> aka-vecgen の管理API
-                                                                          └─mTLS（サービス用の WireGuard）─> aka-radius の管理API
+                                                                          ├─mTLS（サービス用の WireGuard）─> aka-radius の管理API
+                                                                          ├─mTLS（管理面のノードの中）────> radsec-ca の管理API
+                                                                          └─mTLS（サービス用の WireGuard）─> エッジの管理API（複数台）
 ```
 
 ## 特徴
 
-- `/admin/v2/vecgen/...` と `/admin/v2/radius/...` を、下流の `/admin/v2/...` にそのまま中継します。許すのは決めた口だけで（口の一覧は [API 仕様](docs/openapi/provisioner-api.yaml)）、それ以外は 404（`ROUTE_NOT_ALLOWED`）です。aka-vecgen の鍵の読み出しと、RADIUS クライアントの書き込みは通しません。
+- `/admin/v2/vecgen/...` と `/admin/v2/radius/...` を下流の `/admin/v2/...` に、`/admin/v2/ca/...` と `/admin/v2/edges/{edgeId}/...` を radsec-ca とそのエッジの `/...` にそのまま中継します。許すのは決めた口だけで（口の一覧は [API 仕様](docs/openapi/provisioner-api.yaml)）、それ以外は 404（`ROUTE_NOT_ALLOWED`）です。aka-vecgen の鍵の読み出しと、RADIUS クライアントの書き込みは通しません。
 - 本文は解釈せず、下流の応答（エラーを含む）をそのまま返します。下流の ProblemDetails には `downstream` を足し、`Location` は aka-provisioner のパスに書き換えます。
-- 下流を書き換える要求では `Idempotency-Key` が必須です。同じキーの再送には 24 時間のあいだ最初の応答を返します（aka-vecgen・aka-radius は再送の判定を aka-provisioner に任せています）。
+- 下流を書き換える要求では `Idempotency-Key` が必須です。同じキーの再送には 24 時間のあいだ最初の応答を返します（aka-vecgen・aka-radius は再送の判定を aka-provisioner に任せています。radsec-ca とエッジにはキーをそのまま渡します）。
 - 操作者（`X-Operator-Id`）とトレースID（`X-Trace-ID`）を下流に渡すので、aka-provisioner と下流の監査ログを突き合わせられます。
-- 下流を書き換えた中継は監査ログに残します（Valkey の Stream と日ごとの JSONL。`action` は `vecgen.subscriber.create` のような `<下流>.<口>`、値は残しません）。
+- 下流を書き換えた中継は監査ログに残します（Valkey の Stream と日ごとの JSONL。`action` は `vecgen.subscriber.create`・`ca.cert.issue`・`edge.tenant.put` のような `<下流>.<口>`、値は残しません）。
 - 下流の登録簿・管理クライアントのピン・サーバー証明書はファイルに置き、`SIGHUP` で読み直します。
-- 加入者のデータは持ちません（正本は下流、台帳は aka-ossbss）。Ki・OPc はログにも監査ログにも出しません。
+- 加入者のデータは持ちません（正本は下流、台帳は aka-ossbss）。Ki・OPc と Meraki の API キーはログにも監査ログにも出しません。
 
 | API（`/admin/v2`） | 内容 |
 |---|---|
@@ -31,6 +33,8 @@
 | `/audit-logs` | aka-provisioner の監査ログ |
 | `/vecgen/...` | aka-vecgen の管理API の中継（加入者、AV クライアントの読み出し、AV 用のサーバー証明書、監査ログ） |
 | `/radius/...` | aka-radius の管理API の中継（加入者、セッション、利用の集計、RADIUS クライアントと取得先の読み出し、監査ログ） |
+| `/ca/...` | radsec-ca の管理API の中継（CA の作成と持ち込みの CA の登録、CRL、発行、失効） |
+| `/edges/{edgeId}/...` | エッジの管理API の中継（テナントの宣言、CSR と証明書、反映、CRL の取り直し、再起動、ログ、接続の状態） |
 
 ## 導入
 
@@ -55,6 +59,8 @@ docker compose run --rm --no-deps -T aka-provisioner gen-client-cert -name provi
 | `clientCert`・`clientKey` | aka-provisioner のクライアント証明書と秘密鍵（全下流に提示する。同じファイルでよい） |
 | `vecgen.url`・`radius.url` | 下流の管理API の基底 URL（`https://<ホスト>:<ポート>/admin/v2`。サーバー証明書の SAN にあるホスト名か IP） |
 | `vecgen.serverCert`・`radius.serverCert` | 下流の管理API のサーバー証明書（自己署名。信頼の起点にする） |
+| `ca.url`・`ca.serverCert` | radsec-ca の管理API（`https://radsec-ca:9448`。接頭辞なし）とサーバー証明書。省略でき、足すときは `SIGHUP`（運用ガイド 3.5） |
+| `edges[].id`・`.url`・`.serverFingerprint` | エッジの ID（slug）、管理API（接頭辞なし）、サーバー証明書の SHA-256 フィンガープリント（ホスト名は見ない）。省略でき、足すときは `SIGHUP`（運用ガイド 3.6） |
 
 5. コンテナは UID 65532 で動くので、`downstreams/`・`secrets/admin-clients`・`audit/` をこの UID で読み書きできるようにします。
 
@@ -84,7 +90,7 @@ docker compose exec -T aka-provisioner /aka-provisioner server-cert > provisione
 
 下流の登録簿・ピン・サーバー証明書を直したら、`docker compose kill -s HUP aka-provisioner` で読み直します（ログの `*_RELOADED`。読めなければ前のまま続け、`*_RELOAD_ERR`）。下流と同じホストで試すときは、`compose.aka-radius-admin.yaml`・`compose.aka-av.yaml` を重ねます（`.env` の `COMPOSE_FILE`）。
 
-ログは管理面の Fluent Bit（同じ compose）を通して `logs_on_host/` のファイルに書きます。aka-ossbss のログも、aka-ossbss の重ね合わせでここに送ります。ファイルはホストの logrotate で日ごとに圧縮し、2 週間持ちます。
+ログは管理面の Fluent Bit（同じ compose）を通して `logs_on_host/` のファイルに書きます。aka-ossbss と radsec-ca のログも、それぞれの重ね合わせでここに送ります。ファイルはホストの logrotate で日ごとに圧縮し、2 週間持ちます。
 
 ### 環境変数
 
@@ -94,7 +100,8 @@ docker compose exec -T aka-provisioner /aka-provisioner server-cert > provisione
 | `PROVISIONER_TLS_CERT`・`_TLS_KEY`・`_TLS_HOSTS` | API のサーバー証明書と鍵（なければ自己署名を作る）、自己署名の SAN | `/data/tls/cert.pem`・`/data/tls/key.pem`・`localhost,127.0.0.1,aka-provisioner` |
 | `PROVISIONER_ADMIN_CLIENTS_FILE` | 管理クライアントのピンのファイル | `/run/secrets/admin-clients` |
 | `PROVISIONER_DOWNSTREAMS_FILE` | 下流の登録簿のファイル | `/etc/aka-provisioner/downstreams/downstreams.json` |
-| `PROVISIONER_DOWNSTREAM_TIMEOUT` | 下流の 1 回の呼び出しのタイムアウト（30 秒まで） | `5s` |
+| `PROVISIONER_DOWNSTREAM_TIMEOUT` | aka-vecgen・aka-radius の 1 回の呼び出しのタイムアウト（30 秒まで） | `5s` |
+| `PROVISIONER_RADSEC_TIMEOUT` | radsec-ca・エッジの 1 回の呼び出しのタイムアウト（30 秒まで） | `30s` |
 | `PROVISIONER_VALKEY_ADDR`・`_VALKEY_PASSWORD` | 専用の Valkey | `valkey:6379`・（必須） |
 | `PROVISIONER_AUDIT_MAX` | 監査ログの Stream の件数の上限（おおよそ） | `100000` |
 | `PROVISIONER_AUDIT_DIR`・`_AUDIT_RETENTION_DAYS` | 監査ログの日ごとのファイルの置き場所と、持つ日数 | `/data/audit`・`14` |
@@ -120,7 +127,7 @@ Valkey のバックアップと戻しは `scripts/backup-valkey.sh`・`scripts/r
 | ファイル | 内容 |
 |---|---|
 | [docs/design-overview.md](docs/design-overview.md) | 設計概要（MVP。決定事項と段階の記録） |
-| [docs/openapi/provisioner-api.yaml](docs/openapi/provisioner-api.yaml) | API 仕様（2.0.0。中継の口の一覧と、自分の口） |
+| [docs/openapi/provisioner-api.yaml](docs/openapi/provisioner-api.yaml) | API 仕様（2.1.0。中継の口の一覧と、自分の口） |
 | [docs/operation-guide.md](docs/operation-guide.md) | 運用ガイド（導入、下流と管理クライアント、Fluent Bit、公開範囲、ログと監査ログ、バックアップと戻し、更新、障害時の確かめ） |
 
 ## 開発
@@ -137,10 +144,10 @@ Valkey を使う結合の試験は、接続先を環境変数で指定したと�
 PROVISIONER_TEST_VALKEY_ADDR=127.0.0.1:16391 go test ./internal/store/
 ```
 
-下流との契約の試験は、本物の aka-vecgen・aka-radius と aka-provisioner を `scripts/contract.sh` でループバックに起動してから流します（Valkey は Docker で立てます）。下流は aka-mvpset の `versions.env` の固定のコミットからビルドします。
+下流との契約の試験は、本物の aka-vecgen・aka-radius と aka-provisioner を `scripts/contract.sh` でループバックに起動してから流します（Valkey は Docker で立てます）。下流は aka-mvpset の `versions.env` の固定のコミットからビルドします。環境変数 `CA_SRC`・`EDGE_SRC` に radsec-ca・radsec-edge のソース（固定のコミット）を与えると、この 2 つも compose のコンテナで起動して試験します（2 つを与えなければ、その試験は飛ばします）。
 
 ```bash
-scripts/contract.sh up <バイナリのディレクトリ> <作業ディレクトリ>
+CA_SRC=<radsec-ca のソース> EDGE_SRC=<radsec-edge のソース> scripts/contract.sh up <バイナリのディレクトリ> <作業ディレクトリ>
 ```
 
 ```bash
@@ -157,8 +164,8 @@ GitHub Actions（`.github/workflows/ci.yml`）で、push と pull request のた
 |---|---|
 | テスト | gofmt の確認、`go vet`、race 検出つきの試験（Valkey の結合の試験を含む） |
 | イメージと compose の設定 | イメージのビルド、compose の設定の検査（下流が別ホスト・同一ホスト）、compose での起動と healthcheck、Fluent Bit のファイルへの書き込み |
-| 運用ガイドの手順の通し確認 | compose で起動し、mTLS で `/status`、`check-downstream`、管理クライアントのピンの入れ替えと `SIGHUP`、Valkey のバックアップと戻し |
-| 下流との契約の試験 | aka-vecgen・aka-radius を固定のコミット（ci.yml の `VECGEN_REF`・`RADIUS_REF`）でビルドし、口の一覧と下流の OpenAPI を突き合わせ、`scripts/contract.sh` で起動して契約の試験を流す |
+| 運用ガイドの手順の通し確認 | compose で起動し、mTLS で `/status`、`check-downstream`、管理クライアントのピンの入れ替えと `SIGHUP`、Valkey のバックアップと戻し、radsec-ca とエッジの足し方、Fluent Bit のファイル |
+| 下流との契約の試験 | aka-vecgen・aka-radius・radsec-ca・radsec-edge を固定のコミット（ci.yml の `VECGEN_REF`・`RADIUS_REF`・`CA_REF`・`EDGE_REF`）でビルドし、口の一覧と下流の OpenAPI を突き合わせ、`scripts/contract.sh` で起動して契約の試験を流す（宣言 → CSR → 署名 → 反映 → AP の TLS 接続 → 失効 → 拒否を含む） |
 
 依存と標準ライブラリの既知の脆弱性は、`.github/workflows/govulncheck.yml` が push と pull request のたびと、毎週月曜に govulncheck で調べます。
 

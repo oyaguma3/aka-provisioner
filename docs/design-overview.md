@@ -1,7 +1,7 @@
 # aka-provisioner 設計概要（下書き）
 
 - 作成日: 2026-10-26
-- 状態: 下書き。§16 の確認事項は 2026-10-26 にすべて推奨案で合意した（§3.2 の決定事項 1〜8）。段階 3-1 と 3-5 を終えた（2026-10-30・31。§14 の「段階 3-1 で決めたこと」「段階 3-5 で決めたこと」）。radsec-ca とエッジの中継は段階 4-2。
+- 状態: 下書き。§16 の確認事項は 2026-10-26 にすべて推奨案で合意した（§3.2 の決定事項 1〜8）。段階 3-1 と 3-5 を終えた（2026-10-30・31。§14 の「段階 3-1 で決めたこと」「段階 3-5 で決めたこと」）。段階 4-2 で radsec-ca とエッジの中継を足した（2026-11-02。§14 の「段階 4-2 で決めたこと」）。
 - 置き場所: 2026-10-27（MVP セットの段階 1）に、aka-mvpset の `docs/nodes/aka-provisioner.md` から本リポジトリの `docs/design-overview.md` に移した。
 - 対象: 管理面の中継のノード aka-provisioner（もとは eapaka-node-provisioner。以下「もとの実装」）。
 - 関連:
@@ -101,8 +101,8 @@
 |---|---|---|
 | aka-vecgen | `GET /status`、加入者の一覧・一括取得・登録・取得・変更・状態・戻し・削除、`GET /clients`、`GET /av-server-certificate`、`GET /audit-logs` | `GET /subscribers/{imsi}/keys` |
 | aka-radius | `GET /status`、加入者の一覧・一括取得・登録・取得・変更・状態・戻し・削除、`GET /sessions`、`GET /usage`、`GET /clients`、`GET /sources`、`GET /audit-logs` | — （書き込みの口のない RADIUS クライアントと取得先は、もともと下流にない） |
-| radsec-ca | radsec-ca §9.3 の口（CA の作成と停止、発行、失効、一覧、CRL、`/status`）と、§19 の持ち込みの CA の口 | — |
-| エッジ | radsec-edge §12.1 の口（テナント、AP、CSR と証明書、反映、CRL の取り直し、再起動、ログ、最後の接続、`/status`） | — |
+| radsec-ca | OpenAPI の 13 の口すべて（CA の作成と登録・停止、CRL のアップロードと取り直し、取得先の変更、発行、失効、一覧、`/status`） | — |
+| エッジ | OpenAPI の 14 の口すべて（宣言、CSR と証明書、反映、CRL の取り直し、再起動、ログ、最後の接続、`/status`。radsec-edge §12.1） | — |
 
 - 一覧は、下流の OpenAPI と突き合わせる試験で、口の書き漏れと余計な口を見つける（§13）。
 - パスの値（IMSI、ID、名前）は、形を確かめ、1 つのセグメントとしてエスケープしてから送る（もとの実装のまま。`/a%2Fb` が別の口として届かないように）。
@@ -112,7 +112,7 @@
 - 要求の本文は解釈せずに送り、下流の応答（エラーを含む）をそのまま返す。ProblemDetails には拡張の項目 `downstream`（`vecgen` / `radius` / `ca` / `edge:<ID>`）を足す。`Location` は aka-provisioner のパスに書き換える。
 - 下流に接続できない・タイムアウトは 503（`DOWNSTREAM_UNAVAILABLE`）、下流が ProblemDetails でない応答を返したら 502（`DOWNSTREAM_ERROR`）。どちらも `downstream` つき（もとの実装のまま）。
 - `X-Operator-Id` と `X-Trace-ID` は、受け取った値をそのまま下流に渡す（`X-Trace-ID` がなければ採番する）。一括投入の行の操作では、aka-ossbss が `X-Trace-ID` にジョブの ID を入れる（概要 §10.4）。
-- 下流の呼び出しのタイムアウトは `PROVISIONER_DOWNSTREAM_TIMEOUT`（既定 5 秒）。もとの実装は 1 つの操作で下流を 5 回まで呼んだが、MVP では 1 回だけなので、ロックの有効期限との兼ね合いの制限（10 秒まで）はなくす。
+- 下流の呼び出しのタイムアウトは `PROVISIONER_DOWNSTREAM_TIMEOUT`（既定 5 秒）、radsec-ca とエッジは `PROVISIONER_RADSEC_TIMEOUT`（既定 30 秒。段階 4-2 の P4）。もとの実装は 1 つの操作で下流を 5 回まで呼んだが、MVP では 1 回だけなので、ロックの有効期限との兼ね合いの制限（10 秒まで）はなくす。
 - 本文の大きさの上限は 1 MiB（一括取得の 500 件の応答、CSR、CRL を通せるように）。
 - 要求と応答の本文はログに出さない（鍵を含みうるため）。
 
@@ -129,7 +129,7 @@
 
 ### 8.1 ファイル
 
-下流の登録簿をファイル（`PROVISIONER_DOWNSTREAMS_FILE`。JSON）に置き、`SIGHUP` で読み直す（§16 の D4）。登録簿と証明書はディレクトリ `downstreams/` ごと読み取り専用でマウントし、パスは登録簿のファイルからの相対で書ける（段階 3-1 の U5。`ca`・`edges` は段階 4-2 で足す）。
+下流の登録簿をファイル（`PROVISIONER_DOWNSTREAMS_FILE`。JSON）に置き、`SIGHUP` で読み直す（§16 の D4）。登録簿と証明書はディレクトリ `downstreams/` ごと読み取り専用でマウントし、パスは登録簿のファイルからの相対で書ける（段階 3-1 の U5）。`ca`・`edges` は省略できる（段階 4-2 の P2）。エッジのサーバー証明書はホスト名を見ず `serverFingerprint` で照合し、radsec-ca はほかの下流と同じ `serverCert` で検証する（P3）。
 
 ```json
 {
@@ -154,7 +154,7 @@
 管理用の mTLS のピンの入れ替え（概要 §12.3）は、次の順で行う（手順は運用ガイド 3.2）。
 
 1. 新しいクライアント証明書を作る（`aka-provisioner gen-client-cert`）。
-2. 全下流のピンのファイルに、新旧の 2 つを並べて書き、それぞれ `SIGHUP` で読み直す（aka-vecgen・aka-radius はファイル、radsec-ca・エッジは段階 4 でそろえる。§16 の D4）。
+2. 全下流のピンのファイルに、新旧の 2 つを並べて書き、それぞれ `SIGHUP` で読み直す（どのノードもファイル。§16 の D4）。
 3. aka-provisioner の登録簿のクライアント証明書を新しいものに替えて `SIGHUP` を送る。
 4. `/status` で全下流につながることを確かめてから、下流のピンのファイルから古いものを消す。
 
@@ -180,7 +180,8 @@
 | `PROVISIONER_TLS_CERT` / `_TLS_KEY` / `_TLS_HOSTS` | サーバー証明書（なければ自己署名を作る） | もとのまま |
 | `PROVISIONER_ADMIN_CLIENTS_FILE` | 管理クライアントのピンのファイル | `/run/secrets/admin-clients` |
 | `PROVISIONER_DOWNSTREAMS_FILE` | 下流の登録簿のファイル（§8.1） | `/etc/aka-provisioner/downstreams/downstreams.json`（段階 3-1 の U5） |
-| `PROVISIONER_DOWNSTREAM_TIMEOUT` | 下流の 1 回の呼び出しのタイムアウト | `5s` |
+| `PROVISIONER_DOWNSTREAM_TIMEOUT` | aka-vecgen・aka-radius の 1 回の呼び出しのタイムアウト（30 秒まで） | `5s` |
+| `PROVISIONER_RADSEC_TIMEOUT` | radsec-ca・エッジの 1 回の呼び出しのタイムアウト（30 秒まで。段階 4-2 の P4） | `30s` |
 | `PROVISIONER_VALKEY_ADDR` / `_VALKEY_PASSWORD` | 専用の Valkey | もとのまま |
 | `PROVISIONER_AUDIT_MAX` / `PROVISIONER_AUDIT_DIR` / `PROVISIONER_AUDIT_RETENTION_DAYS` | 監査ログの Stream の上限、JSONL の書き出し先、持つ日数 | `100000` / `/data/audit` / `14` |
 | `PROVISIONER_HEALTH_ADDR` | ループバックの healthcheck の口（段階 3-1 の U9） | `127.0.0.1:9090` |
@@ -200,7 +201,7 @@
 | 層 | 内容 |
 |---|---|
 | 単体 | 口の一覧（許す口・通さない口・パスの値のエスケープ）、冪等（必須、処理中、内容の違い、5xx を覚えない）、登録簿とピンの読み直し（形の誤りで前の設定が残る）、`Location` の書き換え、ProblemDetails の `downstream` |
-| 契約 | 下流（aka-vecgen、aka-radius、radsec-ca、radsec-edge）を固定のコミットで CI で起動し、許す口の一覧の全部を呼んで、下流の OpenAPI と口が合っていること、操作者・トレースID が下流の監査ログに残ることを確かめる。エッジと CA は段階 4-2 で足す |
+| 契約 | 下流（aka-vecgen、aka-radius、radsec-ca、radsec-edge）を固定のコミットで CI で起動し、許す口の一覧の全部を呼んで、下流の OpenAPI と口が合っていること、操作者・トレースID が下流の監査ログに残ることを確かめる。エッジと CA は段階 4-2 で足した（下の P12） |
 | 規模 | aka-ossbss の一括投入 1 万件（毎秒 5.6 件以上）を、冪等の記録と監査ログを含めて通せること（概要 §16.1） |
 
 ## 14. 進め方
@@ -210,7 +211,7 @@
 | 1 | リポジトリ `aka-provisioner` を作り、eapaka-node-provisioner の履歴ごと移す。改名だけ | 今の CI が通る |
 | 3-1 | 統合操作・操作の記録・ワーカー・ロック・PLMN マップ・型つきのクライアントをなくし、口の一覧つきの中継（`/admin/v2/vecgen/...`、`/radius/...`）にする。`Idempotency-Key` の必須化、登録簿とピンのファイル、監査ログの書き出し、`/status` | 単体、aka-vecgen・aka-radius との契約の試験。**済み（2026-10-30）**: 下の「段階 3-1 で決めたこと」 |
 | 3-5 | 運用ガイド（下流と管理クライアント、クライアント証明書の入れ替え、Fluent Bit、バックアップと戻し）、`docs/poc/` を消す | 手元の compose。**済み（2026-10-31）**: 下の「段階 3-5 で決めたこと」。エッジの足し方は段階 4-2 で足す |
-| 4-2 | radsec-ca とエッジの中継を足す（radsec-edge §23.1 の 4-2） | 契約の試験（エッジと radsec-ca を CI で起動） |
+| 4-2 | radsec-ca とエッジの中継を足す（radsec-edge §23.1 の 4-2） | 契約の試験（エッジと radsec-ca を CI で起動）。**済み（2026-11-02）**: 下の「段階 4-2 で決めたこと」 |
 
 - 段階 3-1 は aka-vecgen・aka-radius の管理API 2.0.0（それぞれの段階 2）の後に行う。
 
@@ -237,6 +238,21 @@
 - T6: `scripts/backup-valkey.sh`・`restore-valkey.sh` は aka-vecgen・aka-radius から写した。Valkey が持つのは冪等の記録（24 時間）と監査ログの Stream で、失っても業務は続く（ガイドの 8 章）。
 - T9: `docs/poc/` を消し、参照はもとのリポジトリの固定のコミット（`0ca238d`）へのリンクにした。
 - 手元の試しで分かったこと: ピンのファイルはファイルごとマウントしているので、`sed -i`（新しいファイルに置き換える）で書き換えると、動いているコンテナは古い中身を読み続ける（`SIGHUP` でも効かない。Docker Desktop では `start` が mount の誤りになった）。古い行は `grep -v … > 別のファイル`、`cat 別のファイル > ピンのファイル` でその場で書き換える（ガイドの 4.1・4.2）。サーバー証明書の作り直しはボリュームを消して起動し直す（コマンドは足さない）。
+
+段階 4-2 で決めたこと（2026-11-02。aka-mvpset の概要 §18.9 の段階 4 の進め方と、確認事項 P1〜P13 はすべて推奨案で合意）:
+
+- P2: 登録簿の `ca`・`edges` は省略できる（radsec-ca は aka-provisioner が作る共有のネットワークに入るので aka-provisioner が先に起動し、CA のサーバー証明書はその時点でない）。足すときは `SIGHUP`。URL は接頭辞なし。エッジの ID は slug の形で、重複は誤り。`ca` がなければ 503 `DOWNSTREAM_UNAVAILABLE`、登録簿にないエッジは 404 `EDGE_NOT_FOUND`（どちらも再送の判定の前に断り、覚えない。足した後に同じキーでやり直せる。ログは `DOWNSTREAM_NOT_REGISTERED`）。
+- P3: エッジは `serverFingerprint` で照合する（`InsecureSkipVerify` と `VerifyConnection`。チェーンとホスト名は見ない）。`/status` の `serverCertificate` は最後の接続で受け取った証明書で、まだ接続していなければ省く。radsec-ca はほかの下流と同じ `serverCert`（ホスト名も確かめる）。新旧の併記はしない（作り直したら登録簿を改めるまで 503）。`serverFingerprint` はピンのファイルと同じくコロン区切りと大文字も書ける。
+- P4: `PROVISIONER_RADSEC_TIMEOUT`（既定 30 秒、上限 30 秒）を radsec-ca とエッジに使う。`/status` の収集と `check-downstream` はどの下流も 10 秒で打ち切る。
+- P5: 許す口は radsec-ca の 13 とエッジの 14 のすべて。`action` は §10 の形で `ca.ca.create`・`ca.ca.disable`・`ca.crl.upload`・`ca.crl.refresh`・`ca.crl_source.put`・`ca.cert.issue`・`ca.cert.revoke`、`edge.tenant.put`・`edge.tenant.delete`・`edge.server_csr.create`・`edge.server_cert.put`・`edge.probe_csr.create`・`edge.probe_cert.put`・`edge.tenant.apply`・`edge.crl.refresh`・`edge.tenant.restart`。
+- P6: パスの値の形を足した（`tenantId` は `^[1-9][0-9]{0,18}$`、`caId` は `server`・`tenant.<slug>`・`brought.<slug>.<名前>`、`serial` は小文字の 16 進、`edgeId` は slug）。
+- P7: `Idempotency-Key` は radsec-ca とエッジの書き込みにだけ、受け取ったキーをそのまま渡す。
+- P8: 下流の 409 `IDEMPOTENCY_CONFLICT` は aka-provisioner の冪等の記録に残さない（処理中の記録を消す）。下流が 30 秒を超えると 503 で記録を消し、同じキーのやり直しで下流の「処理中」の 409 を 24 時間覚えてしまうため。
+- P9: `Retry-After` と `Idempotent-Replayed` を中継する。`Location` は radsec-ca の `/cas/...`・`/certs/...` を `/admin/v2/ca/...` に書き換える。
+- P10: 監査ログの `target` はパスの値（口のパスの最後の `{名前}`）。パスにない登録と発行は `Location` の最後の要素から取り、本文は解釈しない（aka-vecgen・aka-radius の登録も同じにし、本文の `imsi` を読むのをやめた）。`detail` は下流の名前（`edge:<ID>`）と本文の最上位の項目の名前だけ。本文のないときは `fields` を省く。
+- P11: `/status` と `check-downstream` は登録簿の今の下流を回す（vecgen、radius、ca、エッジの順）。読み直しで消えたエッジは出さず、集めた結果も忘れる。
+- P12: 契約の試験は radsec-ca `934eaeb`・エッジ `6d5652d` を固定のコミットから compose のコンテナで起動する（`scripts/contract.sh` に環境変数 `CA_SRC`・`EDGE_SRC`。aka-vecgen・aka-radius・aka-provisioner はバイナリのまま）。起動の順は本番と同じで、aka-provisioner を先に `ca`・`edges` なしで起動し、その後に登録簿へ足して `SIGHUP` を送る。`internal/contract/radsec_test.go` が、全部の口を aka-provisioner を通して呼び、本物の CA で発行（`group-client` を含む）と持ち込みの CA の登録をし、宣言 → CSR → 署名 → 反映 → AP の TLS 接続（AP・グループ・持ち込みの CA の AP）→ 失効 → `crl:refresh` → 拒否（ほかの AP は巻き込まれない）まで通す。届かない 2 台目のエッジで `/status` と 503、`check-downstream` の失敗と原因の見当を確かめ、Meraki の API キーの値がログと監査ログにないことを確かめる。これが radsec-ca とエッジの実物を組み合わせた最初の確かめ（4-1a・4-1b の試験は試験用の CA だった）。OpenAPI の突き合わせは `:` を含むパスを読めるように直した。自分の API 仕様と口の一覧の突き合わせ（`TestOwnOpenAPI`）も足した。
+- P13: OpenAPI は 2.1.0（項目は下流の OpenAPI を正とする）。運用ガイドの 3.5〜3.7 に radsec-ca とエッジの足し方とタイムアウト、10 章に原因の見当。管理面の Fluent Bit に `app.radsec-ca`・`app.radsec-ca-cloudflared` を足した（エッジは自分の Fluent Bit を持つので足さない）。手順は CI の「運用ガイドの手順の通し確認」のジョブでも確かめる。
 
 ## 15. 他の文書への反映
 

@@ -48,6 +48,24 @@ func TestAllowlistMatchesOpenAPI(t *testing.T) {
 	}
 }
 
+// TestOwnOpenAPI は、aka-provisioner の API 仕様の中継の口が、許す口の一覧とぴったり同じであることを確かめる。
+func TestOwnOpenAPI(t *testing.T) {
+	got, err := openAPIRoutes("../../docs/openapi/provisioner-api.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"GET /audit-logs", "GET /status"}
+	for _, k := range kinds {
+		for _, rt := range allowlist[k] {
+			want = append(want, rt.method+" "+k.pathPrefix()+rt.path)
+		}
+	}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("OpenAPI = %q\nallowlist = %q", got, want)
+	}
+}
+
 // TestOpenAPIRoutes は、: を含むパスと、口の下の parameters を読めることを確かめる。
 func TestOpenAPIRoutes(t *testing.T) {
 	path := t.TempDir() + "/openapi.yaml"
