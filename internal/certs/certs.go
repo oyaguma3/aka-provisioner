@@ -20,6 +20,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,10 +32,22 @@ const (
 	selfSignedValidFor = 10 * 365 * 24 * time.Hour
 )
 
+// fingerprintPattern は SHA-256 のフィンガープリント（16 進小文字）の形。
+var fingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // Fingerprint は証明書（DER）の SHA-256 を 16進小文字で返す。
 func Fingerprint(cert *x509.Certificate) string {
 	sum := sha256.Sum256(cert.Raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// ParseFingerprint は SHA-256 のフィンガープリントの書き方（openssl の出力の : と大文字を含む）を、Fingerprint の形に直す。
+func ParseFingerprint(v string) (string, error) {
+	fp := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(v), ":", ""))
+	if !fingerprintPattern.MatchString(fp) {
+		return "", errors.New("want 64 hex digits")
+	}
+	return fp, nil
 }
 
 // SelfSigned はサーバー認証用の ECDSA P-256 の鍵と自己署名証明書を生成し、PEM で返す。

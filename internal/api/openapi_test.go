@@ -19,7 +19,7 @@ func TestAllowlistMatchesOpenAPI(t *testing.T) {
 		downstream.Vecgen: os.Getenv("PROVISIONER_TEST_VECGEN_OPENAPI"),
 		downstream.Radius: os.Getenv("PROVISIONER_TEST_RADIUS_OPENAPI"),
 	}
-	for _, name := range downstream.Names {
+	for _, name := range relayNames {
 		t.Run(string(name), func(t *testing.T) {
 			path := files[name]
 			if path == "" {

@@ -11,38 +11,64 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/oyaguma3/aka-provisioner/internal/certs"
 )
 
-// basePath は下流の管理API の基底のパス（aka-vecgen・aka-radius の 2.0.0）。登録簿の url はこれで終わる。
+// basePath は aka-vecgen・aka-radius の管理API の基底のパス（2.0.0）。登録簿の url はこれで終わる。
+// radsec-ca とエッジのパスには接頭辞がない（P2）。
 const basePath = "/admin/v2"
 
 // fileFormat は下流の登録簿のファイル（PROVISIONER_DOWNSTREAMS_FILE。設計概要 §8.1）。
 // ファイルのパスは登録簿のファイルからの相対で書ける（ディレクトリごとマウントする）。
-// 段階 3-1 では vecgen と radius だけを受け付ける（ca・edges は段階 4-2 で足す）。
 type fileFormat struct {
 	// ClientCert・ClientKey は、全下流に提示する provisioner のクライアント証明書と秘密鍵。
 	ClientCert string       `json:"clientCert"`
 	ClientKey  string       `json:"clientKey"`
 	Vecgen     *entryFormat `json:"vecgen"`
 	Radius     *entryFormat `json:"radius"`
+	// CA は radsec-ca（省略できる。radsec-ca は aka-provisioner が作る共有のネットワークに入るので、aka-provisioner が先に起動し、
+	// CA のサーバー証明書はその時点でない。足すときは SIGHUP。P2）。
+	CA *entryFormat `json:"ca"`
+	// Edges はエッジの一覧（省略できる）。
+	Edges []edgeFormat `json:"edges"`
 }
 
 type entryFormat struct {
-	// URL は下流の管理API の基底 URL（https://<ホスト>:<ポート>/admin/v2）。
+	// URL は下流の管理API の基底 URL。aka-vecgen・aka-radius は https://<ホスト>:<ポート>/admin/v2、radsec-ca は接頭辞なし。
 	URL string `json:"url"`
 	// ServerCert は下流のサーバー証明書（自己署名。信頼の起点にする）。
 	ServerCert string `json:"serverCert"`
 }
 
+type edgeFormat struct {
+	// ID はエッジの ID（パスの /edges/{edgeId}。slug の形）。
+	ID string `json:"id"`
+	// URL はエッジの管理API の基底 URL（接頭辞なし）。
+	URL string `json:"url"`
+	// ServerFingerprint はエッジのサーバー証明書の SHA-256 フィンガープリント。ホスト名は見ない（P3）。
+	ServerFingerprint string `json:"serverFingerprint"`
+}
+
+// Timeouts は下流の 1 回の呼び出しのタイムアウト（P4）。
+type Timeouts struct {
+	// Downstream は aka-vecgen・aka-radius。
+	Downstream time.Duration
+	// Radsec は radsec-ca とエッジ（CRL の取得や発行に時間がかかる）。
+	Radsec time.Duration
+}
+
 // Registry は下流の登録簿。ファイルから読み、SIGHUP で読み直す（Reload）。
 type Registry struct {
-	path    string
-	timeout time.Duration
-	log     *slog.Logger
+	path     string
+	timeouts Timeouts
+	log      *slog.Logger
 
 	mu  sync.Mutex // Reload を 1 つずつにする
 	cur atomic.Pointer[registrySet]
@@ -50,13 +76,14 @@ type Registry struct {
 
 type registrySet struct {
 	clients    map[Name]*Client
+	names      []Name
 	clientCert *x509.Certificate
 	loadedAt   time.Time
 }
 
 // LoadRegistry は登録簿のファイルを読む。読めない・形が違う・証明書が読めないときはエラーを返す。
-func LoadRegistry(path string, timeout time.Duration, log *slog.Logger) (*Registry, error) {
-	r := &Registry{path: path, timeout: timeout, log: log}
+func LoadRegistry(path string, timeouts Timeouts, log *slog.Logger) (*Registry, error) {
+	r := &Registry{path: path, timeouts: timeouts, log: log}
 	return r, r.Reload()
 }
 
@@ -92,32 +119,71 @@ func (r *Registry) build() (*registrySet, error) {
 		return nil, fmt.Errorf("load client certificate: %w", err)
 	}
 	s := &registrySet{clients: map[Name]*Client{}, clientCert: cert.Leaf, loadedAt: time.Now()}
-	entries := map[Name]*entryFormat{Vecgen: f.Vecgen, Radius: f.Radius}
-	for _, name := range Names {
-		e := entries[name]
-		if e == nil {
-			return nil, fmt.Errorf("%s: required", name)
+	add := func(name Name, opts clientOptions) {
+		opts.name, opts.clientCert, opts.timeout, opts.log = name, cert, r.timeouts.Downstream, r.log
+		if name.radsec() {
+			opts.timeout = r.timeouts.Radsec
 		}
-		base, err := parseBaseURL(e.URL)
+		s.clients[name] = newClient(opts)
+		s.names = append(s.names, name)
+	}
+	addEntry := func(name Name, e *entryFormat) error {
+		base, err := parseBaseURL(e.URL, name)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
+			return fmt.Errorf("%s: %w", name, err)
 		}
 		if e.ServerCert == "" {
-			return nil, fmt.Errorf("%s: serverCert is required", name)
+			return fmt.Errorf("%s: serverCert is required", name)
 		}
 		serverCert, err := readCertificate(resolve(dir, e.ServerCert))
 		if err != nil {
-			return nil, fmt.Errorf("%s: server certificate: %w", name, err)
+			return fmt.Errorf("%s: server certificate: %w", name, err)
 		}
-		s.clients[name] = newClient(clientOptions{
-			name: name, baseURL: base, clientCert: cert, serverCert: serverCert, timeout: r.timeout, log: r.log,
-		})
+		add(name, clientOptions{baseURL: base, serverCert: serverCert})
+		return nil
+	}
+	for _, d := range []struct {
+		name Name
+		e    *entryFormat
+	}{{Vecgen, f.Vecgen}, {Radius, f.Radius}} {
+		if d.e == nil {
+			return nil, fmt.Errorf("%s: required", d.name)
+		}
+		if err := addEntry(d.name, d.e); err != nil {
+			return nil, err
+		}
+	}
+	if f.CA != nil {
+		if err := addEntry(CA, f.CA); err != nil {
+			return nil, err
+		}
+	}
+	for i, e := range f.Edges {
+		if !ValidEdgeID(e.ID) {
+			return nil, fmt.Errorf("edges[%d]: id %q: want %s", i, e.ID, slugPattern)
+		}
+		name := EdgeName(e.ID)
+		if _, dup := s.clients[name]; dup {
+			return nil, fmt.Errorf("edges[%d]: duplicate id %q", i, e.ID)
+		}
+		base, err := parseBaseURL(e.URL, name)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		fp, err := certs.ParseFingerprint(e.ServerFingerprint)
+		if err != nil {
+			return nil, fmt.Errorf("%s: serverFingerprint: %w", name, err)
+		}
+		add(name, clientOptions{baseURL: base, serverFingerprint: fp})
 	}
 	return s, nil
 }
 
-// Client は下流 name のクライアントを返す。
+// Client は下流 name のクライアントを返す。登録簿になければ nil。
 func (r *Registry) Client(name Name) *Client { return r.cur.Load().clients[name] }
+
+// Names は登録簿の今の下流の名前を返す（vecgen、radius、ca、エッジの順。/status の並び）。
+func (r *Registry) Names() []Name { return slices.Clone(r.cur.Load().names) }
 
 // ClientCertificate は provisioner のクライアント証明書を返す。
 func (r *Registry) ClientCertificate() *x509.Certificate { return r.cur.Load().clientCert }
@@ -125,7 +191,15 @@ func (r *Registry) ClientCertificate() *x509.Certificate { return r.cur.Load().c
 // LoadedAt は登録簿を読んだ時刻を返す。
 func (r *Registry) LoadedAt() time.Time { return r.cur.Load().loadedAt }
 
-// readRegistryFile は登録簿のファイルを読む。知らない項目は綴りの誤り（段階 4-2 の ca・edges を含む）として拒否する。
+// slugPattern はエッジの ID の形（radsec-ca・エッジの名前と同じ）。
+const slugPattern = `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
+
+var slugRegexp = regexp.MustCompile(slugPattern)
+
+// ValidEdgeID はエッジの ID の形か。
+func ValidEdgeID(id string) bool { return slugRegexp.MatchString(id) }
+
+// readRegistryFile は登録簿のファイルを読む。知らない項目は綴りの誤りとして拒否する。
 func readRegistryFile(path string) (*fileFormat, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -139,16 +213,21 @@ func readRegistryFile(path string) (*fileFormat, error) {
 	return &f, nil
 }
 
-// parseBaseURL は下流の基底 URL を確かめる。https で、ホストがあり、パスが /admin/v2 であること。
-func parseBaseURL(v string) (*url.URL, error) {
+// parseBaseURL は下流の基底 URL を確かめる。https で、ホストがあり、パスが aka-vecgen・aka-radius は /admin/v2、
+// radsec-ca とエッジは接頭辞なしであること。
+func parseBaseURL(v string, name Name) (*url.URL, error) {
+	want := basePath
+	if name.radsec() {
+		want = ""
+	}
 	u, err := url.Parse(v)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
-		return nil, fmt.Errorf("url %q: want https://<host>:<port>%s", v, basePath)
+		return nil, fmt.Errorf("url %q: want https://<host>:<port>%s", v, want)
 	}
-	if strings.TrimSuffix(u.Path, "/") != basePath || u.RawQuery != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("url %q: path must be %s", v, basePath)
+	if strings.TrimSuffix(u.Path, "/") != want || u.RawQuery != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("url %q: path must be %q", v, want)
 	}
-	u.Path = basePath
+	u.Path = want
 	return u, nil
 }
 

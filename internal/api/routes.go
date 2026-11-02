@@ -23,6 +23,9 @@ type route struct {
 // write は下流を書き換える口か。
 func (rt route) write() bool { return rt.action != "" }
 
+// relayNames は中継する下流。
+var relayNames = []downstream.Name{downstream.Vecgen, downstream.Radius}
+
 // allowlist は下流ごとの、中継を許す口の一覧。下流の OpenAPI と、ここと denylist を合わせたものが同じであることを
 // 契約の試験で確かめる（U3）。下流に口が増えたら、どちらかに足す。
 var allowlist = map[downstream.Name][]route{

@@ -13,7 +13,7 @@ func TestDefaults(t *testing.T) {
 	}
 	if c.Addr != ":9446" || c.AdminClientsFile != "/run/secrets/admin-clients" ||
 		c.DownstreamsFile != "/etc/aka-provisioner/downstreams/downstreams.json" ||
-		c.DownstreamTimeout != 5*time.Second || c.AuditMaxLen != 100000 || c.AuditDir != "/data/audit" ||
+		c.DownstreamTimeout != 5*time.Second || c.RadsecTimeout != 30*time.Second || c.AuditMaxLen != 100000 || c.AuditDir != "/data/audit" ||
 		c.AuditRetentionDays != 14 || c.HealthAddr != "127.0.0.1:9090" || c.ValkeyAddr != "valkey:6379" ||
 		strings.Join(c.TLSHosts, ",") != "localhost,127.0.0.1,aka-provisioner" {
 		t.Errorf("defaults = %+v", c)

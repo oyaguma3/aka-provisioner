@@ -28,6 +28,8 @@ type Config struct {
 	DownstreamsFile string
 	// DownstreamTimeout は下流の 1 回の呼び出しのタイムアウト。
 	DownstreamTimeout time.Duration
+	// RadsecTimeout は radsec-ca とエッジの 1 回の呼び出しのタイムアウト（持ち込みの CA の CRL の取得や、エッジの CRL の取り直しがあるので長い。P4）。
+	RadsecTimeout time.Duration
 
 	// ValkeyAddr・ValkeyPassword は専用の Valkey（Idempotency-Key の記録と監査ログ）。
 	ValkeyAddr     string
@@ -75,6 +77,11 @@ func Load() (Config, error) {
 	} else if c.DownstreamTimeout > MaxDownstreamTimeout {
 		errs = append(errs, fmt.Errorf("PROVISIONER_DOWNSTREAM_TIMEOUT: must be %s or less", MaxDownstreamTimeout))
 	}
+	if c.RadsecTimeout, err = positiveDuration("PROVISIONER_RADSEC_TIMEOUT", 30*time.Second); err != nil {
+		errs = append(errs, err)
+	} else if c.RadsecTimeout > MaxDownstreamTimeout {
+		errs = append(errs, fmt.Errorf("PROVISIONER_RADSEC_TIMEOUT: must be %s or less", MaxDownstreamTimeout))
+	}
 	if c.AuditMaxLen, err = positiveInt("PROVISIONER_AUDIT_MAX", 100000); err != nil {
 		errs = append(errs, err)
 	}
@@ -92,7 +99,7 @@ func Load() (Config, error) {
 	return c, nil
 }
 
-// MaxDownstreamTimeout は PROVISIONER_DOWNSTREAM_TIMEOUT の上限。API のサーバーの書き込みの期限（60 秒）より十分に短くする。
+// MaxDownstreamTimeout は PROVISIONER_DOWNSTREAM_TIMEOUT・PROVISIONER_RADSEC_TIMEOUT の上限。API のサーバーの書き込みの期限（60 秒）より十分に短くする。
 const MaxDownstreamTimeout = 30 * time.Second
 
 func positiveInt(name string, def int64) (int64, error) {

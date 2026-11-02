@@ -21,13 +21,15 @@ import (
 	"github.com/oyaguma3/aka-provisioner/internal/trace"
 )
 
+var testTimeouts = downstream.Timeouts{Downstream: 500 * time.Millisecond, Radsec: 500 * time.Millisecond}
+
 func ok(w http.ResponseWriter, r *http.Request) { downstreamtest.WriteJSON(w, 200, map[string]any{}) }
 
 // load は、vecgen と radius を同じ srv に向けた登録簿を書いて読む（url と証明書は差し替えられる）。
 func load(t *testing.T, vecgenURL string, vecgenCert []byte, radiusURL string, radiusCert []byte) (*downstream.Registry, downstreamtest.Registry) {
 	t.Helper()
 	w := downstreamtest.WriteRegistry(t, vecgenURL, vecgenCert, radiusURL, radiusCert)
-	r, err := downstream.LoadRegistry(w.Path, 500*time.Millisecond, downstreamtest.Discard)
+	r, err := downstream.LoadRegistry(w.Path, testTimeouts, downstreamtest.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +134,7 @@ func TestRegistryErrors(t *testing.T) {
 	entry := func(u string) string { return `{"url":"` + u + `","serverCert":"vecgen-admin.pem"}` }
 	for name, body := range map[string]string{
 		"JSON でない":         `{`,
-		"知らない項目（段階 4-2）":   `{` + base + `,"vecgen":` + entry(srv.BaseURL) + `,"radius":` + entry(srv.BaseURL) + `,"ca":{}}`,
+		"知らない項目":           `{` + base + `,"vecgen":` + entry(srv.BaseURL) + `,"radius":` + entry(srv.BaseURL) + `,"cas":{}}`,
 		"radius がない":       `{` + base + `,"vecgen":` + entry(srv.BaseURL) + `}`,
 		"平文の HTTP":         `{` + base + `,"vecgen":` + entry("http://127.0.0.1:1/admin/v2") + `,"radius":` + entry(srv.BaseURL) + `}`,
 		"パスが違う":            `{` + base + `,"vecgen":` + entry("https://127.0.0.1:1/admin/v1") + `,"radius":` + entry(srv.BaseURL) + `}`,
@@ -144,7 +146,7 @@ func TestRegistryErrors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(w.Dir, "bad.json")
 			downstreamtest.WriteFile(t, path, []byte(body))
-			if _, err := downstream.LoadRegistry(path, time.Second, downstreamtest.Discard); err == nil {
+			if _, err := downstream.LoadRegistry(path, testTimeouts, downstreamtest.Discard); err == nil {
 				t.Error("want error")
 			}
 		})
@@ -242,5 +244,178 @@ func TestDiagnose(t *testing.T) {
 	}
 	if got := downstream.Diagnose(downstream.Vecgen, nil); got != "" {
 		t.Errorf("nil: %q", got)
+	}
+}
+
+// radsecRegistry は、ca と edges を足した登録簿のファイルを読む。
+func radsecRegistry(t *testing.T, srv *downstreamtest.Server, timeouts downstream.Timeouts, extra func(dir string, reg map[string]any)) (*downstream.Registry, downstreamtest.Registry) {
+	t.Helper()
+	w := downstreamtest.WriteRegistry(t, srv.BaseURL, srv.ServerCertPEM, srv.BaseURL, srv.ServerCertPEM, extra)
+	r, err := downstream.LoadRegistry(w.Path, timeouts, downstreamtest.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r, w
+}
+
+// TestRadsecDownstreams は、radsec-ca（接頭辞なし、serverCert）とエッジ（接頭辞なし、serverFingerprint）への中継を確かめる。
+func TestRadsecDownstreams(t *testing.T) {
+	var path, key string
+	srv := downstreamtest.NewServer(t, func(w http.ResponseWriter, r *http.Request) {
+		path, key = r.URL.EscapedPath(), r.Header.Get("Idempotency-Key")
+		w.Header().Set("Retry-After", "2")
+		w.Header().Set("Idempotent-Replayed", "true")
+		downstreamtest.WriteProblem(w, 503, `{"title":"Service Unavailable","status":503,"cause":"TENANT_BUSY"}`)
+	})
+	reg, _ := radsecRegistry(t, srv, testTimeouts, func(dir string, m map[string]any) {
+		downstreamtest.WriteFile(t, filepath.Join(dir, "ca-admin.pem"), srv.ServerCertPEM)
+		m["ca"] = map[string]string{"url": srv.RootURL(), "serverCert": "ca-admin.pem"}
+		// エッジのサーバー証明書はホスト名を見ない（SAN は 127.0.0.1 だけで、localhost につなぐ）。コロン区切りの大文字も書ける。
+		fp := strings.ToUpper(srv.Fingerprint())
+		m["edges"] = []any{
+			map[string]string{"id": "edge-01", "url": strings.Replace(srv.RootURL(), "127.0.0.1", "localhost", 1), "serverFingerprint": fp[:2] + ":" + fp[2:]},
+			map[string]string{"id": "edge-02", "url": srv.RootURL() + "/", "serverFingerprint": strings.Repeat("ab", 32)},
+		}
+	})
+	want := []downstream.Name{downstream.Vecgen, downstream.Radius, downstream.CA, downstream.EdgeName("edge-01"), downstream.EdgeName("edge-02")}
+	if got := reg.Names(); !slices.Equal(got, want) {
+		t.Errorf("names = %v", got)
+	}
+	if reg.Client(downstream.EdgeName("none")) != nil {
+		t.Error("unknown edge: want nil")
+	}
+
+	// radsec-ca: 接頭辞がなく、Idempotency-Key を渡し、Retry-After と Idempotent-Replayed を受け取る。":" はそのまま送る。
+	ca := reg.Client(downstream.CA)
+	resp, err := ca.Relay(t.Context(), downstream.RelayRequest{Method: http.MethodPost, Path: []string{"cas", "tenant.a", "crl:refresh"}, IdempotencyKey: "k-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/cas/tenant.a/crl:refresh" || key != "k-1" || resp.RetryAfter != "2" || resp.IdempotentReplayed != "true" {
+		t.Errorf("relay = %s %s %+v", path, key, resp)
+	}
+	if ca.ServerCertificate() == nil {
+		t.Error("ca has no server certificate")
+	}
+	// Idempotency-Key を与えなければ付けない。
+	if _, err := ca.Relay(t.Context(), downstream.RelayRequest{Method: http.MethodGet, Path: []string{"status"}}); err != nil || key != "" {
+		t.Errorf("no key: %q, %v", key, err)
+	}
+
+	// エッジ: 接続するまで証明書を持たず、接続すると受け取った証明書を返す。
+	edge := reg.Client(downstream.EdgeName("edge-01"))
+	if edge.ServerCertificate() != nil {
+		t.Error("edge has a certificate before connecting")
+	}
+	if _, err := edge.Relay(t.Context(), downstream.RelayRequest{Method: http.MethodGet, Path: []string{"tenants", "42"}}); err != nil {
+		t.Fatal(err)
+	}
+	if path != "/tenants/42" || edge.ServerCertificate() == nil || edge.ServerCertificate().Subject.CommonName != "downstream" {
+		t.Errorf("edge: %s %v", path, edge.ServerCertificate())
+	}
+
+	// フィンガープリントが違えば接続せず、原因の見当を出す。
+	bad := reg.Client(downstream.EdgeName("edge-02"))
+	err = getStatus(t, bad)
+	if _, ok := errors.AsType[*downstream.FingerprintError](err); !ok {
+		t.Fatalf("mismatch: %v", err)
+	}
+	if got := downstream.Diagnose(bad.Name(), err); !strings.Contains(got, "edge:edge-02") || !strings.Contains(got, "serverFingerprint と一致しません") {
+		t.Errorf("hint = %q", got)
+	}
+	if bad.ServerCertificate() != nil {
+		t.Error("the certificate of a mismatched edge is kept")
+	}
+}
+
+// TestRadsecTimeout は、radsec-ca とエッジだけが長いタイムアウトを使い、原因の見当に環境変数の名前が出ることを確かめる。
+func TestRadsecTimeout(t *testing.T) {
+	srv := downstreamtest.NewServer(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		ok(w, r)
+	})
+	reg, _ := radsecRegistry(t, srv, downstream.Timeouts{Downstream: 50 * time.Millisecond, Radsec: 5 * time.Second}, func(dir string, m map[string]any) {
+		downstreamtest.WriteFile(t, filepath.Join(dir, "ca-admin.pem"), srv.ServerCertPEM)
+		m["ca"] = map[string]string{"url": srv.RootURL(), "serverCert": "ca-admin.pem"}
+		m["edges"] = []any{map[string]string{"id": "edge-01", "url": srv.RootURL(), "serverFingerprint": srv.Fingerprint()}}
+	})
+	err := getStatus(t, reg.Client(downstream.Vecgen))
+	if got := downstream.Diagnose(downstream.Vecgen, err); !strings.Contains(got, "PROVISIONER_DOWNSTREAM_TIMEOUT") {
+		t.Errorf("vecgen: %q (err %v)", got, err)
+	}
+	for _, n := range []downstream.Name{downstream.CA, downstream.EdgeName("edge-01")} {
+		if err := getStatus(t, reg.Client(n)); err != nil {
+			t.Errorf("%s: %v", n, err)
+		}
+		if got := downstream.Diagnose(n, &net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}); !strings.Contains(got, "PROVISIONER_RADSEC_TIMEOUT") {
+			t.Errorf("%s: %q", n, got)
+		}
+	}
+}
+
+func TestRadsecRegistryErrors(t *testing.T) {
+	srv := downstreamtest.NewServer(t, ok)
+	fp := srv.Fingerprint()
+	edge := func(id, u, fp string) map[string]string {
+		return map[string]string{"id": id, "url": u, "serverFingerprint": fp}
+	}
+	for name, set := range map[string]func(m map[string]any){
+		"ca の接頭辞": func(m map[string]any) {
+			m["ca"] = map[string]string{"url": srv.BaseURL, "serverCert": "vecgen-admin.pem"}
+		},
+		"ca の証明書がない": func(m map[string]any) { m["ca"] = map[string]string{"url": srv.RootURL()} },
+		"ca の平文": func(m map[string]any) {
+			m["ca"] = map[string]string{"url": "http://127.0.0.1:1", "serverCert": "vecgen-admin.pem"}
+		},
+		"エッジの接頭辞":     func(m map[string]any) { m["edges"] = []any{edge("e1", srv.BaseURL, fp)} },
+		"エッジの ID の形":  func(m map[string]any) { m["edges"] = []any{edge("Edge_1", srv.RootURL(), fp)} },
+		"エッジの ID がない": func(m map[string]any) { m["edges"] = []any{edge("", srv.RootURL(), fp)} },
+		"エッジの ID の重複": func(m map[string]any) {
+			m["edges"] = []any{edge("e1", srv.RootURL(), fp), edge("e1", srv.RootURL(), fp)}
+		},
+		"指紋がない": func(m map[string]any) { m["edges"] = []any{edge("e1", srv.RootURL(), "")} },
+		"指紋の形":  func(m map[string]any) { m["edges"] = []any{edge("e1", srv.RootURL(), "abcd")} },
+		"エッジの serverCert": func(m map[string]any) {
+			m["edges"] = []any{map[string]string{"id": "e1", "url": srv.RootURL(), "serverCert": "x.pem"}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := downstreamtest.WriteRegistry(t, srv.BaseURL, srv.ServerCertPEM, srv.BaseURL, srv.ServerCertPEM, func(_ string, m map[string]any) { set(m) })
+			if _, err := downstream.LoadRegistry(w.Path, testTimeouts, downstreamtest.Discard); err == nil {
+				t.Error("want error")
+			}
+		})
+	}
+}
+
+// TestRegistryReloadEdges は、読み直しでエッジを足せて、消したエッジのクライアントがなくなることを確かめる。
+func TestRegistryReloadEdges(t *testing.T) {
+	srv := downstreamtest.NewServer(t, ok)
+	reg, w := load(t, srv.BaseURL, srv.ServerCertPEM, srv.BaseURL, srv.ServerCertPEM)
+	if got := reg.Names(); !slices.Equal(got, []downstream.Name{downstream.Vecgen, downstream.Radius}) {
+		t.Errorf("names = %v", got)
+	}
+	if reg.Client(downstream.CA) != nil {
+		t.Error("ca: want nil")
+	}
+	orig, err := os.ReadFile(w.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	added := strings.Replace(string(orig), `{"clientCert"`,
+		`{"edges":[{"id":"e1","url":"`+srv.RootURL()+`","serverFingerprint":"`+srv.Fingerprint()+`"}],"clientCert"`, 1)
+	downstreamtest.WriteFile(t, w.Path, []byte(added))
+	if err := reg.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if err := getStatus(t, reg.Client(downstream.EdgeName("e1"))); err != nil {
+		t.Fatal(err)
+	}
+	downstreamtest.WriteFile(t, w.Path, orig)
+	if err := reg.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if reg.Client(downstream.EdgeName("e1")) != nil || len(reg.Names()) != 2 {
+		t.Errorf("edge remains: %v", reg.Names())
 	}
 }

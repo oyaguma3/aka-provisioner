@@ -250,7 +250,7 @@ func problemOf(t *testing.T, w *httptest.ResponseRecorder, wantStatus int) probl
 // TestAllowlist は、許す口がすべて下流の同じメソッドとパスに届き、書き込みでは Idempotency-Key を求めることを確かめる。
 func TestAllowlist(t *testing.T) {
 	values := map[string]string{"{imsi}": "440100123456789", "{clientId}": "7"}
-	for _, name := range downstream.Names {
+	for _, name := range relayNames {
 		for _, rt := range allowlist[name] {
 			t.Run(string(name)+" "+rt.method+" "+rt.path, func(t *testing.T) {
 				e := newEnv(t)

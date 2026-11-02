@@ -95,7 +95,7 @@ func (h *Handler) getStatus(w http.ResponseWriter, r *http.Request) {
 	out.DownstreamsLoadedAt = s.DownstreamsLoadedAt()
 	out.ClientCertificate = certInfo(s.ClientCertificate())
 	out.ServerCertificate = certInfo(s.ServerCertificate())
-	for _, name := range downstream.Names {
+	for _, name := range relayNames {
 		c := h.Downstream(name)
 		d := downstreamJSON{Name: string(name), URL: c.BaseURL(), ServerCertificate: certInfo(c.ServerCertificate())}
 		if res, ok := s.Poller.result(name); ok {
@@ -142,7 +142,7 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 // またつながったとき（DOWNSTREAM_REACHABLE）にログを出す（30 秒ごとに同じログを出さない）。
 func (p *Poller) PollOnce(ctx context.Context) {
 	var wg sync.WaitGroup
-	for _, name := range downstream.Names {
+	for _, name := range relayNames {
 		wg.Go(func() { p.poll(ctx, name) })
 	}
 	wg.Wait()

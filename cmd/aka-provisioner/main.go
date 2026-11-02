@@ -1,4 +1,4 @@
-// aka-provisioner は、管理面の aka-ossbss から下流（aka-vecgen・aka-radius の管理API）への変更の経路を 1 つにまとめる中継。
+// aka-provisioner は、管理面の aka-ossbss から下流（aka-vecgen・aka-radius・radsec-ca・エッジの管理API）への変更の経路を 1 つにまとめる中継。
 // 許した口だけを通し、書き込みでは Idempotency-Key を必須にし、監査ログを残す。設計は docs/design-overview.md を参照。
 package main
 
@@ -123,7 +123,7 @@ func serve(ctx context.Context) error {
 	}
 	logPins(log, "loaded admin clients", "ADMIN_CLIENTS_LOADED", pins)
 
-	reg, err := downstream.LoadRegistry(cfg.DownstreamsFile, cfg.DownstreamTimeout, log)
+	reg, err := downstream.LoadRegistry(cfg.DownstreamsFile, timeouts(cfg), log)
 	if err != nil {
 		return fatal(log, "failed to load downstreams registry", "DOWNSTREAMS_LOAD_ERR", err)
 	}
@@ -140,7 +140,13 @@ func serve(ctx context.Context) error {
 	}
 	defer healthSrv.Close()
 
-	relayer := func(n downstream.Name) api.Relayer { return reg.Client(n) }
+	relayer := func(n downstream.Name) api.Relayer {
+		// nil のポインターを入れたインターフェースは nil にならないので、登録簿にないときは nil を返す。
+		if c := reg.Client(n); c != nil {
+			return c
+		}
+		return nil
+	}
 	poller := &api.Poller{Downstream: relayer, Log: log}
 	h := &api.Handler{
 		Log:        log,
@@ -243,11 +249,19 @@ func logServerCert(log *slog.Logger, msg, eventID string, f *certs.File) {
 func logRegistry(log *slog.Logger, msg, eventID string, reg *downstream.Registry) {
 	args := []any{"event_id", eventID,
 		"client_cert_fingerprint", certs.Fingerprint(reg.ClientCertificate()), "client_cert_not_after", reg.ClientCertificate().NotAfter}
-	for _, n := range downstream.Names {
+	for _, n := range reg.Names() {
 		c := reg.Client(n)
-		args = append(args, string(n)+"_url", c.BaseURL(), string(n)+"_server_cert_not_after", c.ServerCertificate().NotAfter)
+		args = append(args, string(n)+"_url", c.BaseURL())
+		// フィンガープリントで照合するエッジは、接続するまで証明書を持たない。
+		if cert := c.ServerCertificate(); cert != nil {
+			args = append(args, string(n)+"_server_cert_not_after", cert.NotAfter)
+		}
 	}
 	log.Info(msg, args...)
+}
+
+func timeouts(cfg config.Config) downstream.Timeouts {
+	return downstream.Timeouts{Downstream: cfg.DownstreamTimeout, Radsec: cfg.RadsecTimeout}
 }
 
 // checkDownstream は登録簿を読み、全下流の /status に接続できるかを確かめて表示する。導入時の確認に使う。
@@ -257,18 +271,24 @@ func checkDownstream(ctx context.Context) error {
 		return err
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	reg, err := downstream.LoadRegistry(cfg.DownstreamsFile, cfg.DownstreamTimeout, log)
+	reg, err := downstream.LoadRegistry(cfg.DownstreamsFile, timeouts(cfg), log)
 	if err != nil {
 		return err
 	}
 	fmt.Println("下流の登録簿:", cfg.DownstreamsFile)
 	fmt.Println("クライアント証明書のフィンガープリント:", certs.Fingerprint(reg.ClientCertificate()))
 	var errs []error
-	for _, n := range downstream.Names {
+	for _, n := range reg.Names() {
 		c := reg.Client(n)
 		fmt.Println()
-		fmt.Printf("%s: %s（サーバー証明書の有効期限 %s）\n", n, c.BaseURL(), c.ServerCertificate().NotAfter.Local().Format(time.DateOnly))
-		resp, err := c.Relay(ctx, downstream.RelayRequest{Method: http.MethodGet, Path: []string{"status"}})
+		fmt.Printf("%s: %s\n", n, c.BaseURL())
+		statusCtx, cancel := context.WithTimeout(ctx, downstream.StatusTimeout)
+		resp, err := c.Relay(statusCtx, downstream.RelayRequest{Method: http.MethodGet, Path: []string{"status"}})
+		cancel()
+		// フィンガープリントで照合するエッジは、接続できたら受け取った証明書の期限が分かる。
+		if cert := c.ServerCertificate(); cert != nil {
+			fmt.Printf("  サーバー証明書の有効期限 %s\n", cert.NotAfter.Local().Format(time.DateOnly))
+		}
 		switch {
 		case err != nil:
 			fmt.Println("  接続できませんでした:", err)

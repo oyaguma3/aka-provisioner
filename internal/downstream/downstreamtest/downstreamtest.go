@@ -69,8 +69,8 @@ type Registry struct {
 }
 
 // WriteRegistry は、vecgen と radius をそれぞれの基底 URL とサーバー証明書で指す登録簿のファイルを、
-// provisioner のクライアント証明書とともに一時のディレクトリに書く。
-func WriteRegistry(t *testing.T, vecgenURL string, vecgenCert []byte, radiusURL string, radiusCert []byte) Registry {
+// provisioner のクライアント証明書とともに一時のディレクトリに書く。extra は登録簿の最上位の項目に足す（ca、edges。証明書はディレクトリに置いてから）。
+func WriteRegistry(t *testing.T, vecgenURL string, vecgenCert []byte, radiusURL string, radiusCert []byte, extra ...func(dir string, reg map[string]any)) Registry {
 	t.Helper()
 	dir := t.TempDir()
 	clientCertPEM, clientKeyPEM, err := certs.SelfSignedClient("provisioner", time.Hour)
@@ -91,6 +91,9 @@ func WriteRegistry(t *testing.T, vecgenURL string, vecgenCert []byte, radiusURL 
 		"vecgen":     map[string]string{"url": vecgenURL, "serverCert": "vecgen-admin.pem"},
 		"radius":     map[string]string{"url": radiusURL, "serverCert": "radius-admin.pem"},
 	}
+	for _, f := range extra {
+		f(dir, reg)
+	}
 	b, err := json.Marshal(reg, json.Deterministic(true))
 	if err != nil {
 		t.Fatal(err)
@@ -98,6 +101,14 @@ func WriteRegistry(t *testing.T, vecgenURL string, vecgenCert []byte, radiusURL 
 	path := filepath.Join(dir, "downstreams.json")
 	WriteFile(t, path, b)
 	return Registry{Path: path, Dir: dir, ClientFP: certs.Fingerprint(clientCert.Leaf)}
+}
+
+// RootURL はサーバーの接頭辞なしの基底 URL を返す（radsec-ca とエッジ）。
+func (s *Server) RootURL() string { return s.URL }
+
+// Fingerprint はサーバー証明書のフィンガープリントを返す。
+func (s *Server) Fingerprint() string {
+	return certs.Fingerprint(s.TLS.Certificates[0].Leaf)
 }
 
 // WriteFile はテスト用のファイルを書く。

@@ -18,10 +18,7 @@ import (
 	"github.com/oyaguma3/aka-provisioner/internal/certs"
 )
 
-var (
-	clientNamePattern  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
-	fingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-)
+var clientNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // Clients は管理クライアントの一覧。フィンガープリント（SHA-256、16進小文字）から識別名を引く。
 type Clients map[string]string
@@ -41,9 +38,9 @@ func ParseClients(v string) (Clients, error) {
 		if !ok || !clientNamePattern.MatchString(name) {
 			return nil, fmt.Errorf("line %d: want <name>=<sha256 fingerprint>", i+1)
 		}
-		fp = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(fp), ":", ""))
-		if !fingerprintPattern.MatchString(fp) {
-			return nil, fmt.Errorf("line %d: bad fingerprint for %q: want 64 hex digits", i+1, name)
+		fp, err := certs.ParseFingerprint(fp)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: bad fingerprint for %q: %w", i+1, name, err)
 		}
 		if other, dup := clients[fp]; dup {
 			return nil, fmt.Errorf("line %d: fingerprint of %q is already used by %q", i+1, name, other)

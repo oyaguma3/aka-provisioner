@@ -55,7 +55,7 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+basePath+"/status", h.getStatus)
 	mux.HandleFunc("GET "+basePath+"/audit-logs", h.listAuditLogs)
-	for _, name := range downstream.Names {
+	for _, name := range relayNames {
 		for _, rt := range allowlist[name] {
 			handler := h.relayHandler(name, rt)
 			if rt.write() {
@@ -173,7 +173,7 @@ func (h *Handler) withFallback(mux *http.ServeMux) http.Handler {
 			mux.ServeHTTP(w, r)
 			return
 		}
-		for _, name := range downstream.Names {
+		for _, name := range relayNames {
 			if strings.HasPrefix(r.URL.Path, basePath+"/"+string(name)+"/") {
 				h.Log.WarnContext(r.Context(), "route is not allowed", "event_id", "RELAY_DENIED", "trace_id", trace.From(r.Context()),
 					"downstream", string(name), "method", r.Method, "path", r.URL.Path, "mgmt_client", mgmtClientFrom(r.Context()))

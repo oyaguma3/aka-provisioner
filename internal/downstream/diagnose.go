@@ -11,16 +11,17 @@ import (
 
 // hints は、下流に接続できなかったときに示す対処の文。%[1]s に下流の名前が入る。
 var hints = struct {
-	hostnameMismatch, unknownServer, serverCertInvalid, clientRejected, connectionReset, nameNotFound, dialFailed, timeout string
+	hostnameMismatch, unknownServer, fingerprintMismatch, serverCertInvalid, clientRejected, connectionReset, nameNotFound, dialFailed, timeout string
 }{
-	hostnameMismatch:  "%[1]s のサーバー証明書の SAN に、登録簿の url のホスト名か IP アドレスが入っていません。",
-	unknownServer:     "%[1]s のサーバー証明書が、登録簿の serverCert と一致しません（%[1]s が証明書を作り直したら、登録簿の証明書も差し替えて SIGHUP を送ってください）。",
-	serverCertInvalid: "%[1]s のサーバー証明書が有効期間外です。",
-	clientRejected:    "%[1]s が provisioner のクライアント証明書を受け付けませんでした。%[1]s の管理クライアントのピンのファイルに、provisioner のクライアント証明書のフィンガープリントがあるか確かめてください。",
-	connectionReset:   "%[1]s が接続を切りました。%[1]s の管理クライアントのピンのファイルに、provisioner のクライアント証明書のフィンガープリントがあるか確かめてください。",
-	nameNotFound:      "%[1]s のホスト名 %[2]s を解決できません（同じホストの構成では、%[1]s が動いているか、共有のネットワークに入っているか確かめてください）。",
-	dialFailed:        "%[1]s に接続できません。%[1]s が動いているか、登録簿の url のアドレスとポート、ファイアウォールを確かめてください。",
-	timeout:           "%[1]s から時間内に応答がありません（PROVISIONER_DOWNSTREAM_TIMEOUT）。",
+	hostnameMismatch:    "%[1]s のサーバー証明書の SAN に、登録簿の url のホスト名か IP アドレスが入っていません。",
+	unknownServer:       "%[1]s のサーバー証明書が、登録簿の serverCert と一致しません（%[1]s が証明書を作り直したら、登録簿の証明書も差し替えて SIGHUP を送ってください）。",
+	fingerprintMismatch: "%[1]s のサーバー証明書のフィンガープリントが、登録簿の serverFingerprint と一致しません（%[1]s が証明書を作り直したら、登録簿の値も改めて SIGHUP を送ってください）。",
+	serverCertInvalid:   "%[1]s のサーバー証明書が有効期間外です。",
+	clientRejected:      "%[1]s が provisioner のクライアント証明書を受け付けませんでした。%[1]s の管理クライアントのピンのファイルに、provisioner のクライアント証明書のフィンガープリントがあるか確かめてください。",
+	connectionReset:     "%[1]s が接続を切りました。%[1]s の管理クライアントのピンのファイルに、provisioner のクライアント証明書のフィンガープリントがあるか確かめてください。",
+	nameNotFound:        "%[1]s のホスト名 %[2]s を解決できません（同じホストの構成では、%[1]s が動いているか、共有のネットワークに入っているか確かめてください）。",
+	dialFailed:          "%[1]s に接続できません。%[1]s が動いているか、登録簿の url のアドレスとポート、ファイアウォールを確かめてください。",
+	timeout:             "%[1]s から時間内に応答がありません（%[2]s）。",
 }
 
 // Diagnose は、下流に接続できなかったときの原因の見当を、運用者向けの文で返す。
@@ -34,6 +35,9 @@ func Diagnose(name Name, err error) string {
 	}
 	if _, ok := errors.AsType[x509.UnknownAuthorityError](err); ok {
 		return fmt.Sprintf(hints.unknownServer, name)
+	}
+	if _, ok := errors.AsType[*FingerprintError](err); ok {
+		return fmt.Sprintf(hints.fingerprintMismatch, name)
 	}
 	if _, ok := errors.AsType[x509.CertificateInvalidError](err); ok {
 		return fmt.Sprintf(hints.serverCertInvalid, name)
@@ -58,7 +62,11 @@ func Diagnose(name Name, err error) string {
 		return fmt.Sprintf(hints.dialFailed, name)
 	}
 	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
-		return fmt.Sprintf(hints.timeout, name)
+		env := "PROVISIONER_DOWNSTREAM_TIMEOUT"
+		if name.radsec() {
+			env = "PROVISIONER_RADSEC_TIMEOUT"
+		}
+		return fmt.Sprintf(hints.timeout, name, env)
 	}
 	return ""
 }
