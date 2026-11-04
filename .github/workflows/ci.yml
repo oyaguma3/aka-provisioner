@@ -258,8 +258,8 @@ jobs:
       # （下流の API を変えたら、その main に入った後のコミットに更新する）。
       VECGEN_REF: 2d4837939660fbadcec67b27b4ac333f96a77374
       RADIUS_REF: 00506874286cca3d454e3ba64365c6e7f0b10fe6
-      CA_REF: 934eaeb4e3e5d26196a40731edea1fdb681422f1
-      EDGE_REF: 6d5652dca97b26e2674debdbc0f75363fbbd65fb
+      CA_REF: bb00abf4a207acdcf1209f1845ba3d9fed7b79ec
+      EDGE_REF: 8edbdd34169a87e535211b425b1377a5fec0ce08
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
