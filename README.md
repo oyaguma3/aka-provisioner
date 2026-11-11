@@ -132,7 +132,7 @@ Valkey のバックアップと戻しは `scripts/backup-valkey.sh`・`scripts/r
 
 ## 開発
 
-Go 1.27.3 を使います。外部依存は `github.com/valkey-io/valkey-go` だけです。
+Go 1.27.4 を使います。外部依存は `github.com/valkey-io/valkey-go` だけです。
 
 ```bash
 go test ./...

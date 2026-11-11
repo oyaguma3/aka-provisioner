@@ -62,7 +62,7 @@
 
 ## 4. 技術方針
 
-- もとの実装の方針を引き継ぐ。Go 1.27.3、標準ライブラリを優先、外部依存は `github.com/valkey-io/valkey-go` だけ。
+- もとの実装の方針を引き継ぐ。Go 1.27.4、標準ライブラリを優先、外部依存は `github.com/valkey-io/valkey-go` だけ。
 - module パスは `github.com/oyaguma3/aka-provisioner`、コマンド名は `aka-provisioner`、環境変数の接頭辞は `PROVISIONER_`（もとのまま。§16 の D5）。
 - 配備は Docker Compose（aka-provisioner と専用の Valkey）。管理面のノードに aka-ossbss・radsec-ca と並べる。
 - ブランチは `main` に直接コミットする（もとの実装と同じ）。
