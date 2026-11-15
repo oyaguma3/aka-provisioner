@@ -259,7 +259,7 @@ jobs:
       VECGEN_REF: 6ac8b6024e2c1133b3de2836e9e365fcfa35f4b0
       RADIUS_REF: b85cd68920fb49758b6765200e836f11ab00eadf
       CA_REF: cefb98206396f3e112db855e500049281bcc032c
-      EDGE_REF: 3946d604be19fc7bc14a79f404aa4c9d495622e8
+      EDGE_REF: 3b0521388e7ea358491c5d9b2969ba815ee67e3b
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7

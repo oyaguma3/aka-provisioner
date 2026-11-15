@@ -370,6 +370,27 @@ func TestContractRadsec(t *testing.T) {
 			}
 			time.Sleep(2 * time.Second)
 		}
+		// 反映の任意の本文（コンテナのひな形。radsec-edge の §24.14）は、そのまま中継する。前の形の記録はまだないので 409 で、
+		// 今の形は反映した形と同じなので作り直さずに成功する。
+		if p := c.want(c.do(http.MethodPost, tenant+"/apply", key("edge-apply-prev"), "t-edge-apply-prev", map[string]string{"template": "previous"}), 409, "previous").json(t); p["cause"] != "NO_PREVIOUS_TEMPLATE" || p["downstream"] != "edge:"+edgeID {
+			t.Errorf("apply previous = %v", p)
+		}
+		c.want(c.do(http.MethodPost, tenant+"/apply", key("edge-apply-latest"), "t-edge-apply-latest", map[string]string{"template": "latest"}), 202, "apply latest")
+		deadline = time.Now().Add(150 * time.Second)
+		for {
+			got := c.want(c.do(http.MethodGet, tenant, "", "t-edge-get", nil), 200, "tenant").json(t)
+			state = got["apply"].(map[string]any)
+			if state["state"] == "idle" {
+				if tpl, _ := got["template"].(map[string]any); state["lastResult"] != "ok" || tpl["current"] != true {
+					t.Fatalf("apply latest = %v (template %v)", state, got["template"])
+				}
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("apply latest did not finish: %v", state)
+			}
+			time.Sleep(2 * time.Second)
+		}
 	})
 
 	t.Run("AP の接続と失効", func(t *testing.T) {
