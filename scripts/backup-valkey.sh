@@ -17,16 +17,22 @@ fi
 cli() {
 	docker compose exec -T valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning "$@"' valkey-cli "$@"
 }
-# 起動してからスナップショットを書き終えた回数（BGSAVE の終わりを、この数が増えたことで知る）
+# 起動してからスナップショットを取り始めた回数。Valkey は BGSAVE を始めたとき（fork のとき）にこの数を増やすので、増えただけでは
+# まだ書いている途中で、dump.rdb は前のスナップショットのまま。数が増え、かつ書いている途中でなくなるまで待つ（aka-mvpset の段階 6 の B6-1）
 saves() {
 	cli INFO persistence | sed -n 's/^rdb_saves:\([0-9]*\).*/\1/p'
+}
+saved() {
+	p=$(cli INFO persistence)
+	[ "$(printf '%s\n' "$p" | sed -n 's/^rdb_saves:\([0-9]*\).*/\1/p')" != "$before" ] &&
+		printf '%s\n' "$p" | grep -q '^rdb_bgsave_in_progress:0'
 }
 
 before=$(saves)
 # 自動のスナップショットや AOF の書き直しの途中なら、終わってから取る
 cli BGSAVE SCHEDULE > /dev/null
 i=0
-until [ "$(saves)" != "$before" ]; do
+until saved; do
 	i=$((i + 1))
 	if [ "$i" -gt 600 ]; then
 		echo "backup-valkey: スナップショットが 10 分たっても終わらない" >&2

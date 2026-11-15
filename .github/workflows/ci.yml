@@ -188,8 +188,13 @@ jobs:
         run: |
           A="curl -sS --cacert $RUNNER_TEMP/server.pem --cert $RUNNER_TEMP/ossbss-new.pem --key $RUNNER_TEMP/ossbss-new.key"
           v() { docker compose exec -T valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning "$@"' valkey-cli "$@"; }
+          # スナップショットを 1 鍵 0.1 秒遅らせて書き終わるまでの時間を延ばし、書き終わる前に写す誤り（前のスナップショットを写す）を
+          # 表に出す（aka-mvpset の段階 6 の B6-1）。試験のためだけの設定で、戻すときの起動で消える
+          v CONFIG SET rdb-key-save-delay 100000
+          for i in $(seq 1 20); do v SET "ci:pad:$i" x > /dev/null; done
           v SET ci:marker before
           scripts/backup-valkey.sh backups/valkey.rdb
+          v CONFIG SET rdb-key-save-delay 0
           # 写しの後の変更は、戻すと消える
           v SET ci:marker after
           scripts/restore-valkey.sh backups/valkey.rdb
