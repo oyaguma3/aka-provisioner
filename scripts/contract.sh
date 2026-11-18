@@ -19,7 +19,11 @@ set -euo pipefail
 valkey_password=contract
 containers=(contract-valkey-vecgen contract-valkey-radius contract-valkey-prov)
 shared_network=contract-shared
-radsecproxy_image=radsec-edge/radsecproxy:1.11.4-pc1
+# radsecproxy_image はエッジのテナントの radsecproxy のイメージのタグを、エッジのソースの compose.yaml（radsecproxy-image の image。
+# エッジの agent が使うタグと同じ）から読む（エッジの版を上げても、ここを直さずに済むように）。
+radsecproxy_image() {
+  sed -n 's|^[[:space:]]*image:[[:space:]]*\(radsec-edge/radsecproxy:[^[:space:]]*\)[[:space:]]*$|\1|p' "$EDGE_SRC/compose.yaml" | head -n 1
+}
 
 # own <UID:GID> <パス>... はコンテナの UID に読み書きさせる。sudo があれば手順どおり chown し、なければ権限を広げる（手元の確かめ）。
 own() {
@@ -50,7 +54,10 @@ radsec_up() {
   local bin=$1 prov_pin=$2
   docker build -q --build-arg VERSION=contract -t radsec-ca:contract "$CA_SRC" > /dev/null
   docker build -q --build-arg VERSION=contract -t radsec-edge:contract "$EDGE_SRC" > /dev/null
-  docker image inspect "$radsecproxy_image" > /dev/null 2>&1 || docker build -q -t "$radsecproxy_image" "$EDGE_SRC/images/radsecproxy" > /dev/null
+  local rs_image
+  rs_image=$(radsecproxy_image)
+  [ -n "$rs_image" ] || { echo "cannot read the radsecproxy image tag from $EDGE_SRC/compose.yaml" >&2; exit 1; }
+  docker image inspect "$rs_image" > /dev/null 2>&1 || docker build -q -t "$rs_image" "$EDGE_SRC/images/radsecproxy" > /dev/null
   docker network create "$shared_network" > /dev/null
 
   # エッジ。テナントのネットワークを作るので先に起動する（radsec-ca の配布の口にこのネットワークで届く）。
