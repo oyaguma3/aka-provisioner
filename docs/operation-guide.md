@@ -128,6 +128,8 @@ radsec-ca とエッジは登録簿で省略できる。aka-vecgen・aka-radius �
 
 5. 動いているなら読み直させる（`docker compose kill -s HUP aka-provisioner`）。`check-downstream` で確かめる。
 
+   `docker compose kill -s HUP` を送ったコンテナには Docker が「手で止めた」の印を付けるので、ホストを再起動すると `unless-stopped` でも起き上がらない（aka-mvpset の段階 5 の T5-15）。送った後に `docker compose up -d aka-provisioner` を一度流して印を消す（動いているコンテナは作り直されない）。aka-mvpset の配置では、起動のときに `aka-compose-up.service` が起こし直す。この後の章の `SIGHUP` も同じ。
+
 登録簿は `downstreams/` のディレクトリごとマウントしているので、`mv` で置き換えてもよい。読み直しでは、ピン・登録簿・サーバー証明書をそれぞれ読み直す（ログの `*_RELOADED`）。読めない・形が違うときは前のまま続ける（`*_RELOAD_ERR`）。登録簿を読み直すと、次の要求から新しいクライアントを使い、すぐに下流の状態を集め直す。
 
 `check-downstream` は全下流の `/status` を呼び、つながらなければ原因の見当を出す（10 章）。同じ内容は `/status` の `downstreams[].hint` にも出る。
